@@ -539,6 +539,45 @@ acceptance per core: one known-good disc boots and plays with audio.
 record /tmp/physcd_stats.log hit rate per core - a core whose read
 pattern defeats the two-window cache will show up as misses there.
 
+#### 2026-07-20: first psx hardware test - froze the mister
+
+probe on the psx disc (12 tracks, 681MB): fingerprint psx correct,
+1072 KB/s sequential, raw subchannel supported, and the flags matrix
+FINALLY captured - `data 0xF8 ok / data CDROMREADRAW ok / audio 0xF8
+ok / audio 0x10 ok`. this drive honours everything, so the flags-byte
+risk from section 6 is closed for it (the per-track-type split still
+matters for other drives).
+
+but: `seek+read avg 585ms, worst 2479ms`, versus 194/248ms on the
+megacd disc. same drive, so that is disc-dependent - and it was enough
+to expose a real defect.
+
+`mount_phys` locked the mister hard: no osd, no input, hard reboot to
+recover. /tmp/physcd_stats.log did not exist, and since the counters
+only increment AFTER fill_cache returns, that places the freeze inside
+the very first fill_cache.
+
+root cause: a cache miss is serviced on the MAIN thread - the same one
+answering the fpga - and that path was unbounded. a failed burst fell
+into per-sector retries of 3 attempts x 8s, so one bad region could
+block for ~6 minutes; and the io mutex was held around the whole retry
+loop, so a consumer miss could also queue behind a background storm.
+fixed in commit e8cd010 (see the commit message for the full list).
+
+the dmesg errors during this are NOT ours and are a red herring:
+opcode 0x28 is READ(10), the cooked block read, which we never issue -
+we only use 0xBE via SG_IO. sense key 0x5 ASC 0x64 is "illegal mode
+for this track", the expected answer when the kernel/udev probes a
+mode 2 psx disc as a filesystem on media change. harmless noise, but
+it does mean something else is touching the block device: worth
+checking whether mister companion or zaparoo polls the optical drive,
+since that contends with us for the head.
+
+still unverified after the fix: whether the disc boots, the 150-sector
+bias, and psx region detection (the core defaulted to US on a disc the
+user believes is EU - but the freeze happened before region detection
+could run, so that proves nothing yet).
+
 ### phase 7: polish
 - scratched-disc watchdog behavior review (backend currently serves
   zeros after 3 retries so cores don't hang; verify cores tolerate it)

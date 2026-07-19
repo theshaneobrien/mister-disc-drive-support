@@ -141,6 +141,17 @@ sentinel path convention: `set_image` functions receive the string
   main prints to serial/console, or run MiSTer from ssh in the
   foreground to see printf output. keep a known-good binary as
   /media/fat/MiSTer.bak.
+- runtime telemetry: /tmp/physcd_stats.log, rewritten every 5s while
+  streaming (cache hit/miss, worst miss ms, per-window cursors). first
+  thing to check for any "is it the drive?" question.
+
+### test hardware and media on hand (2026-07-19)
+
+- de10-nano mister; b0260 slim usb cd drive (qualified: 741 KB/s,
+  248ms worst seek, raw subchannel supported)
+- discs: sonic cd (PAL, mega cd), plus psx, saturn, neogeo cd and
+  pc dos (ao486) titles for phase 6. no pcecd/turbografx disc yet.
+- an NTSC sonic cd .chd for A/B comparison against the PAL disc
 
 ## 5. phases and acceptance criteria
 
@@ -323,21 +334,97 @@ small c daemon (reuse probe code) started from user-startup:
 acceptance: insert mega cd disc from the main menu, game boots hands-free.
 
 ### phase 6: more cores
-psx (mind the 150-sector pregap bias in its toc convention, see
-PATCHPOINTS.md), then saturn, pcecd, neogeo (may need iso9660, decide
-kernel module vs userspace iso parser), ao486 last.
+
+test media ON HAND (2026-07-19): psx, saturn, neogeo cd, pc dos
+(ao486). NOT on hand: a pcecd/turbografx disc - that core is blocked
+on acquiring media, so it moves to the back regardless of difficulty.
+
+order:
+1. **psx** - mind the 150-sector pregap bias in its toc convention
+   (see PATCHPOINTS.md). prior art confirms mister psx lbas already
+   include the 150 lead-in, so the drive's absolute lbas map directly.
+   subchannel works on this drive, so libcrypt titles may not need
+   .sbi at all - a differentiator vs both public forks, neither of
+   which implements subchannel.
+2. **saturn** - same trio as megacd, same rules.
+3. **neogeo cd** - the open question is whether it streams sectors via
+   the toc or parses iso9660 for files. if filesystem: prefer a small
+   userspace iso9660 reader over a kernel module, to keep the "stock
+   kernel" property. NOTE the payoff is double - psx achievement
+   hashing in phase 8 also needs to locate a file via iso9660, so the
+   same reader serves both. write it once, reuse.
+4. **ao486 (pc dos)** - listed last originally, but reconsider: it is
+   ATAPI request/response through ide_cdrom.cpp, with no cdd state
+   machine and no realtime audio deadline, so it may be the SIMPLEST
+   of the four rather than the hardest. different shape though: back
+   the ATAPI READ commands with physcd instead of adding a toc.phys
+   branch to a cdd read function. data-only dos discs have no cdda
+   timing pressure at all.
+5. **pcecd** - blocked on media. `seektime.cpp` stays untouched (it
+   models simulated seek, which is exactly why prefetch must stay
+   ahead).
 
 acceptance per core: one known-good disc boots and plays with audio.
+record /tmp/physcd_stats.log hit rate per core - a core whose read
+pattern defeats the two-window cache will show up as misses there.
 
 ### phase 7: polish
 - scratched-disc watchdog behavior review (backend currently serves
   zeros after 3 retries so cores don't hang; verify cores tolerate it)
 - disc swap for multi-disc games (eject detection -> cdd open/close
-  status transitions; megacd cdd already has CD_STAT_OPEN)
-- psx libcrypt: if subchannel unsupported, wire the existing .sbi
-  lookup by disc serial
+  status transitions; megacd cdd already has CD_STAT_OPEN). NOTE this
+  is where the deferred load_toc/fill_cache race must be fixed - see
+  the phase 3 results notes.
+- psx libcrypt: subchannel IS supported on the b0260, so try reading
+  real subchannel first; keep the existing .sbi lookup by disc serial
+  as the fallback for drives that can't
 - osd feedback: Info() popup on disc detect ("physcd: PSX disc
   detected") is a two-line add in the daemon-adjacent main code
+
+### phase 8: retroachievements coexistence
+
+why it is a phase and not a setting: the mister RA stack installs its
+own Main_MiSTer fork AS /media/fat/MiSTer - the same binary slot as
+ours. you cannot run both. see section 6c for how that stack is built;
+this is the task list.
+
+1. **merge.** `git remote add odelot <fork>`, merge into `physcd`,
+   resolve. both are gpl forks of the same upstream. expected overlap
+   is near zero: they hook the main loop / ddram / user_io, we touch
+   megacd cdd internals + support/physcd + one fifo command. do this
+   merge FIRST and keep it rebased - the longer both forks drift, the
+   worse it gets.
+2. **verify nothing regressed.** cue and chd games must still work on
+   the merged binary, and RA must still fire on file-backed games.
+   this is the regression floor before any physical work.
+3. **rbf/launcher side: expected to need nothing.** RA symlinks
+   _Console launcher paths at _RA_Cores builds, and physcdd resolves
+   cores through _Console, so with RA active the daemon should load
+   the RA core automatically. the RA megacd rbf keeps the MEGACD
+   corename, so is_megacd() and mount_phys work unchanged. VERIFY,
+   don't assume.
+4. **the actual work: achievement identification.** rcheevos hashes cd
+   games by reading early disc sectors through a cdreader abstraction
+   (open_track / read_sector / close_track function pointers), NOT by
+   hashing an image file - which is lucky, because a physical mount
+   has no file. register a cdreader backed by physcd_read_sector when
+   the filename is the physcd sentinel; the sectors it wants are
+   already in our cache. verify the exact struct/callback names
+   against odelot's vendored rcheevos copy rather than trusting this
+   description. sega cd and saturn hash the disc header near the start
+   of the data track (easy); psx must locate its boot executable via
+   iso9660 (needs the phase 6 item 3 reader).
+
+acceptance: on one merged binary - (a) a cue/chd game still earns
+achievements, proving no regression; (b) a physical disc boots on the
+RA megacd core AND starts an RA session with the correct game
+identified; (c) an achievement actually triggers from physical media.
+
+fallback if the merge turns ugly: ship two binaries and a switcher
+script (MiSTer vs MiSTer_RA), which is what the physical-disc prior
+art does for its own routing. strictly worse - two builds to maintain,
+no achievements when using physical discs - so treat it as a retreat,
+not a plan.
 
 ## 6. risks and mitigations
 
@@ -348,7 +435,8 @@ acceptance per core: one known-good disc boots and plays with audio.
 | index >1 audio positions (rare games) | drive toc lacks index marks; accept as known limitation, document |
 | usb power spikes on spin-up | powered hub, document requirement |
 | upstream drift | keep all changes behind toc.phys / sentinel; rebase quarterly |
-| neogeo needs iso9660 | prefer tiny userspace iso9660 reader over kernel module to keep "stock kernel" property |
+| neogeo needs iso9660 | prefer tiny userspace iso9660 reader over kernel module to keep "stock kernel" property; the same reader is needed for psx achievement hashing, so it pays for itself twice |
+| RA fork and our fork claim the same /media/fat/MiSTer slot | merge the two forks (phase 8), do it early and rebase often; two-binary switcher only as a retreat |
 
 ## 6b. drive compatibility (design position)
 
@@ -372,7 +460,7 @@ media (different read path, not implemented - cd media only).
 multiple drives: autodetect prefers the one with media, `mount_phys
 <n>` pins /dev/srN.
 
-## 6c. retroachievements coexistence (phase 8 candidate)
+## 6c. retroachievements coexistence (background for phase 8)
 
 the mister RA stack (manyhats-mike/mister-fpga-retroachievements,
 installed via mister companion) = odelot's fork of Main_MiSTer (reads

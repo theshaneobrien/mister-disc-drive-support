@@ -271,6 +271,36 @@ fixed (commit 82a6d16):
   after a FAILED mount that meant retries could never recover. phys
   mounts now always re-init.
 
+#### 2026-07-19 later still: autodetect verified; stutter is NOT the backend
+
+bare `mount_phys` boots the game with the drive on /dev/sr1. fix
+verified on hardware.
+
+stutter status: persists with the two-window cache, but the stats
+exonerate the backend - during the stuttering intro:
+`hit 750-752 miss 0  hitrate 100.0%  worst miss 0 ms`, both windows
+active. every sector is served from ram in microseconds; the core is
+not waiting on the drive. sector starvation cannot be the cause.
+
+crucial new variable: the physical disc is a PAL sonic cd (plays clean
+on real hardware); the comparison copy that runs smooth on mister is
+an NTSC chd. that comparison changes two things at once (pal/ntsc AND
+disc/chd), so it does not implicate the backend. leading hypothesis:
+50hz-content cadence judder - pal content on a 60hz output shows
+"periodic stutter on top of low fps", real pal hardware on a pal tv
+at 50hz doesn't, and an ntsc chd at 60-on-60 doesn't either.
+
+next experiments, in order of effort:
+1. zero effort: check MiSTer.ini vsync_adjust and whether the display
+   is running 50hz for this core; check the megacd osd region setting
+   and which bios boot.rom actually is (eu bios for a pal disc).
+2. decisive: rip the PAL disc to chd on the pc with the same usb
+   drive (chdman createcd), play that chd - if it stutters the same,
+   the fork is fully exonerated and it's core/video-timing territory.
+3. bonus symmetric test: chdman extractcd the ntsc chd, burn to cd-r
+   (megacd has no copy protection, burns boot), play physically -
+   tests ntsc+physical.
+
 ### phase 4: mount_phys command [code done]
 - input.cpp fifo handler: `mount_phys <idx>` dispatches by core type
   like the user_io.cpp boot-config block (is_megacd -> mcd_set_image

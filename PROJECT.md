@@ -174,17 +174,32 @@ suspects are (a) that specific disc's lead-in, or (b) the drive's
 optics/calibration after an hour of continuous retry (slim usb drives
 run hot; thermal drift is real).
 
-decisive test is a DIFFERENT, healthy disc - and the same drive on the
-pc it was just ripping on, which cross-checks drive health independent
-of the mister entirely. matrix:
-  other disc works on mister -> drive fine, that disc's lead-in is gone
-  no disc works on mister but works on pc -> mister-side, investigate
-  nothing works anywhere -> drive; let it cool, then replace
-`dmesg | tail -50` distinguishes further: sense keys of NOT READY vs
-MEDIUM ERROR separate "cannot spin up / focus" from "read it, bad data".
+windows agreed with the mister and named the failure precisely:
+`Win32_CDROMDrive.MediaLoaded = False`, `Status = OK`, and NO cdrom
+errors in the event log at all. that is a media DETECTION failure, not
+a read failure - the drive never got far enough to error. which also
+identified the hardware properly: an HL-DT-ST GTA0N 24x tray dvd
+writer behind an Initio INIC-1618L usb-sata bridge (so "b0260" is the
+enclosure, not the drive).
 
-do not judge drive health with the PAL sonic cd - cdrdao already
-showed it to be marginal at the outer edge.
+RESOLVED: eject, insert any other disc, reinsert the original -> media
+detected, `SONIC_CD___`, CDFS, HealthStatus Healthy. drive and disc
+both fine. the data track reads out at 112,533,504 bytes = 54948
+sectors, which lines up with the 55248-sector track 1 in our toc, so
+the disc is intact too.
+
+cause, by elimination: the fault survived a mister reboot, a replug
+and two other machines, so it was not latched electronic state - it
+was MECHANICAL. the disc had come off the spindle hub. a tray drive
+carried between machines with a disc still loaded will unseat it, and
+an unseated disc gives exactly this signature: motor spins up over and
+over, nothing rotates with it, no media ever detected.
+
+LESSON: eject before moving a tray drive. and when a drive reports no
+media, cycle the TRAY before suspecting anything electrical - it is
+the one action that forces a real re-evaluation, and it is cheaper
+than the reboot/replug/reseat ladder that will not fix a mechanical
+unseat.
 
 ### test hardware and media on hand (2026-07-19)
 

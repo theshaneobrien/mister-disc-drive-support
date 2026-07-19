@@ -224,8 +224,9 @@ follow PATCHPOINTS.md megacd section exactly. summary:
 - ReadData/ReadCDDA/ReadSubcode get `toc.phys` branches mirroring the
   FILE branch (no byteswap)
 - seek sites call physcd_seek_hint(lba)
-- mcd_set_image handles the sentinel: bios from HomeDir()/boot.rom,
-  fixed save name for v1
+- mcd_set_image handles the sentinel: bios from HomeDir() chosen by
+  detected disc region (boot_EU/US/JP.rom, then boot.rom), fixed save
+  name for v1
 - menu: not needed for v1, mount via fifo
 
 acceptance: a real mega cd game boots from disc and is playable
@@ -300,6 +301,51 @@ disc/chd), so it does not implicate the backend. leading hypothesis:
 50hz-content cadence judder - pal content on a 60hz output shows
 "periodic stutter on top of low fps", real pal hardware on a pal tv
 at 50hz doesn't, and an ntsc chd at 60-on-60 doesn't either.
+
+#### 2026-07-19: SOLVED - it was a bios region mismatch
+
+both my hypotheses were wrong. a PAL chd stuttered identically, ruling
+out the physical path; the actual cause was the PAL game running on a
+US cd bios. swapping to an EU bios fixed it completely. the backend,
+the disc and the cache were all fine the whole time. worth remembering
+how confidently the wrong causes were argued: the correct experiment
+(same content, different bios) was cheaper than either hypothesis and
+was not run first.
+
+why it matters for this project specifically: file-backed games load
+`cd_bios.rom` from the GAME'S OWN FOLDER, so multi-region collections
+already get a per-game bios. a physical disc has no folder, so it fell
+through to a single fixed `HomeDir()/boot.rom` - every disc got
+whatever region that happened to be. physical mounts are exactly the
+case where region auto-detection is REQUIRED rather than nice.
+
+implemented (commit 6f10eeb):
+- `physcd_region()` reads the mega drive style header the disc mirrors
+  in its first data sector ("SEGA" at 0x100, region field at 0x1F0),
+  handling both the old J/U/E letter form and the newer hex bitfield
+  (bit0 japan / bit2 americas / bit3 europe). multi-region discs
+  prefer US then EU then JP - only reachable when all are valid.
+- mcd_set_image opens the drive EARLY (the bios is chosen before
+  cdd.Load() runs) and loads `HomeDir()/boot_<REGION>.rom`, also
+  accepting `bios_<REGION>.rom`, falling back to plain `boot.rom`.
+  existing single-bios setups are unaffected.
+- if it does fall back, it reads the bios rom's OWN header (same
+  parser - mega cd bios roms carry the same mega drive header) and
+  raises a printf + osd Info() on mismatch: "EU disc on US BIOS - add
+  boot_EU.rom". the exact evening this cost, surfaced in 6 seconds.
+- physcd_probe prints `disc region:` so a disc can be checked without
+  deploying anything.
+
+setup note for users: put region bioses in the megacd home dir as
+boot_EU.rom / boot_US.rom / boot_JP.rom. boot.rom still works as the
+catch-all.
+
+not done, unverified: whether the megacd core ALSO has a region/video
+status bit that should be set (the core appears to take its region
+from the bios). psx needs none of this - it already has its own
+region detection (psx_get_region / region_info_table in psx.cpp) which
+will work through psx_read_cd once the phys branch is wired, so phase
+6 gets it for free.
 
 #### 2026-07-19: the disc itself is a suspect (competing hypothesis)
 
@@ -459,6 +505,7 @@ not a plan.
 | cold seeks exceed modeled latency | seek hint at cdd command time + 10MB prefetch; if still short, add optional "instant seek off" tolerance testing |
 | index >1 audio positions (rare games) | drive toc lacks index marks; accept as known limitation, document |
 | usb power spikes on spin-up | powered hub, document requirement |
+| bios region does not match disc region (plays, but stutters) | detect region from the disc header and load boot_<REGION>.rom; warn via osd when falling back to a mismatched boot.rom. file-backed games dodge this via per-folder cd_bios.rom, physical discs cannot |
 | aging/rotting discs read marginally, esp. outer edge | backend zero-fills after retries so the core never hangs, and now COUNTS it (stats `BAD`) so it can't masquerade as a clean read. possible enhancement: we currently request CDROM_SELECT_SPEED 0 = MAXIMUM, which is right for prefetch headroom on a good disc but wrong for a marginal one - slower reads recover more. consider dropping speed adaptively once BAD goes nonzero |
 | upstream drift | keep all changes behind toc.phys / sentinel; rebase quarterly |
 | neogeo needs iso9660 | prefer tiny userspace iso9660 reader over kernel module to keep "stock kernel" property; the same reader is needed for psx achievement hashing, so it pays for itself twice |

@@ -133,6 +133,42 @@ struct track_info {
 	uint32_t start_lba;
 };
 
+/* mega drive style header: "SEGA..." at 0x100, region at 0x1F0. mega cd
+ * discs mirror it in their first data sector. a pal disc booted on a us
+ * bios plays but runs at the wrong timing and stutters, so the mount
+ * path uses this to pick a matching bios - print it here so a disc can
+ * be checked without deploying. */
+static const char *md_region(const uint8_t *user)
+{
+	if (memcmp(user + 0x100, "SEGA", 4)) return NULL;
+
+	const char *f = (const char *)user + 0x1F0;
+	int has_j = 0, has_u = 0, has_e = 0, junk = 0;
+	for (int i = 0; i < 3; i++) {
+		char c = f[i];
+		if (c == 'J') has_j = 1;
+		else if (c == 'U') has_u = 1;
+		else if (c == 'E') has_e = 1;
+		else if (c != ' ' && c != 0) junk = 1;
+	}
+
+	if (!junk && (has_j || has_u || has_e)) {
+		if (has_u) return "US";
+		if (has_e) return "EU";
+		return "JP";
+	}
+
+	int v = -1;
+	if (f[0] >= '0' && f[0] <= '9') v = f[0] - '0';
+	else if (f[0] >= 'A' && f[0] <= 'F') v = f[0] - 'A' + 10;
+	if (v > 0) {
+		if (v & 4) return "US";
+		if (v & 8) return "EU";
+		if (v & 1) return "JP";
+	}
+	return NULL;
+}
+
 static const char *fingerprint(int fd, struct track_info *tracks, int ntracks)
 {
 	uint8_t buf[RAW_SECTOR * 2];
@@ -217,7 +253,20 @@ int main(int argc, char **argv)
 		printf("  leadout : lba %u (%u MB raw)\n", lead.cdte_addr.lba,
 			(unsigned)((uint64_t)lead.cdte_addr.lba * RAW_SECTOR / (1024 * 1024)));
 
-	printf("\ndisc type: %s\n\n", fingerprint(fd, tracks, ntracks));
+	printf("\ndisc type: %s\n", fingerprint(fd, tracks, ntracks));
+
+	/* region, for sega discs that carry a mega drive style header */
+	for (int i = 0; i < ntracks; i++) {
+		uint8_t sec[RAW_SECTOR];
+		if (!tracks[i].is_data) continue;
+		if (read_cd_raw(fd, tracks[i].start_lba, 1, sec)) break;
+
+		const char *r = md_region(sec + 16);
+		if (r) printf("disc region: %s  (needs a %s BIOS: boot_%s.rom)\n", r, r, r);
+		else printf("disc region: not found in header\n");
+		break;
+	}
+	printf("\n");
 
 	/* benchmark: sequential raw read */
 	uint8_t *big = malloc(RAW_SECTOR * 32);

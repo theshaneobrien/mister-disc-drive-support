@@ -91,6 +91,28 @@ typedef enum {
 physcd_disc_t physcd_identify();
 const char *physcd_disc_name(physcd_disc_t t);
 
+// disc region. a pal disc booted on a us bios runs at the wrong
+// timing - it plays, but stutters - so the mount path uses this to
+// pick a matching bios.
+typedef enum {
+	PHYSCD_REGION_UNKNOWN = 0,
+	PHYSCD_REGION_JP,
+	PHYSCD_REGION_US,
+	PHYSCD_REGION_EU,
+} physcd_region_t;
+
+// region of the mounted disc. mega cd only for now: it reads the
+// mega drive style header the disc mirrors in its first data sector.
+physcd_region_t physcd_region();
+
+// parse a mega drive style header block (>= 0x1F3 bytes, "SEGA" at
+// 0x100, region field at 0x1F0). exposed because mega cd BIOS roms
+// carry the same header, so callers can cross-check disc against bios.
+physcd_region_t physcd_region_from_md_header(const uint8_t *hdr, int len);
+
+// "JP" / "US" / "EU", or "" when unknown
+const char *physcd_region_name(physcd_region_t r);
+
 void physcd_close();
 
 #endif

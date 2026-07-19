@@ -126,13 +126,22 @@ void mcd_set_image(int num, const char *filename)
 	cdd.Unload();
 	cdd.status = CD_STAT_OPEN;
 
+	int phys = !strcmp(filename, PHYSCD_SENTINEL);
+	physcd_region_t disc_region = PHYSCD_REGION_UNKNOWN;
+
+	/* the bios is picked further down, BEFORE cdd.Load() opens the
+	   drive, so open it early here to read the disc's region. a pal
+	   disc booted on a us bios plays but runs at the wrong timing and
+	   stutters, which is not obvious to diagnose from the symptom. */
+	if (phys && !physcd_open(NULL)) disc_region = physcd_region();
+
 	int same_game = *filename && *last_dir && !strncmp(last_dir, filename, strlen(last_dir));
 
 	/* the phys sentinel is one fixed string, so a remount would always
 	   look like the same game and skip the bios load + reset - including
 	   after a failed mount, which would then never recover. a physical
 	   mount is always a fresh disc: re-init every time. */
-	if (!strcmp(filename, PHYSCD_SENTINEL)) same_game = 0;
+	if (phys) same_game = 0;
 
 	strcpy(last_dir, filename);
 	char *p = strrchr(last_dir, '/');
@@ -148,18 +157,65 @@ void mcd_set_image(int num, const char *filename)
 		mcd_reset();
 
 		loaded = 0;
-		strcpy(buf, last_dir);
-		char *p = strrchr(buf, '/');
-		if (p)
+		if (phys)
 		{
-			strcpy(p + 1, "cd_bios.rom");
-			loaded = user_io_file_tx(buf);
+			/* no game folder on a physical disc, so match the bios to
+			   the disc's own region: boot_EU.rom / boot_US.rom /
+			   boot_JP.rom (bios_XX.rom also accepted) in HomeDir,
+			   falling back to plain boot.rom below. */
+			const char *rn = physcd_region_name(disc_region);
+			if (*rn)
+			{
+				sprintf(buf, "%s/boot_%s.rom", HomeDir(), rn);
+				loaded = user_io_file_tx(buf);
+				if (!loaded)
+				{
+					sprintf(buf, "%s/bios_%s.rom", HomeDir(), rn);
+					loaded = user_io_file_tx(buf);
+				}
+			}
+			printf("\x1b[32mMCD: physical disc region %s%s\n\x1b[0m",
+				*rn ? rn : "unknown",
+				loaded ? ", loaded matching BIOS" : ", falling back to boot.rom");
+		}
+		else
+		{
+			strcpy(buf, last_dir);
+			char *bp = strrchr(buf, '/');
+			if (bp)
+			{
+				strcpy(bp + 1, "cd_bios.rom");
+				loaded = user_io_file_tx(buf);
+			}
 		}
 
 		if (!loaded)
 		{
 			sprintf(buf, "%s/boot.rom", HomeDir());
 			loaded = user_io_file_tx(buf);
+
+			/* the generic bios may not match the disc. that boots and
+			   plays, then stutters, which is an easy evening to lose -
+			   so read the bios header and say so out loud. */
+			if (loaded && phys && disc_region != PHYSCD_REGION_UNKNOWN)
+			{
+				static uint8_t hdr[0x200];
+				physcd_region_t bios_region = PHYSCD_REGION_UNKNOWN;
+
+				if (FileLoad(buf, hdr, sizeof(hdr)) >= 0x1F3)
+					bios_region = physcd_region_from_md_header(hdr, sizeof(hdr));
+
+				if (bios_region != PHYSCD_REGION_UNKNOWN && bios_region != disc_region)
+				{
+					static char msg[128];
+					sprintf(msg, "%s disc on %s BIOS - add boot_%s.rom",
+						physcd_region_name(disc_region),
+						physcd_region_name(bios_region),
+						physcd_region_name(disc_region));
+					printf("\x1b[32mMCD: WARNING: %s\n\x1b[0m", msg);
+					Info(msg, 6000);
+				}
+			}
 		}
 
 		if (!loaded) Info("CD BIOS not found!", 4000);
@@ -176,7 +232,7 @@ void mcd_set_image(int num, const char *filename)
 
 			if (!same_game)
 			{
-				if (!strcmp(filename, PHYSCD_SENTINEL))
+				if (phys)
 				{
 					/* no game folder on a physical disc: fixed save
 					   name, no per-game bios/cart/cheats lookup */

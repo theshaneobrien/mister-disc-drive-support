@@ -628,6 +628,75 @@ physcd_disc_t physcd_identify()
 	return PHYSCD_DISC_UNKNOWN;
 }
 
+physcd_region_t physcd_region_from_md_header(const uint8_t *hdr, int len)
+{
+	if (!hdr || len < 0x1F3) return PHYSCD_REGION_UNKNOWN;
+
+	/* mega drive style header: "SEGA..." at 0x100, region at 0x1F0.
+	   mega cd discs mirror this in their first data sector and mega cd
+	   bios roms carry it too, so one parse serves both. */
+	if (memcmp(hdr + 0x100, "SEGA", 4)) return PHYSCD_REGION_UNKNOWN;
+
+	const char *f = (const char *)hdr + 0x1F0;
+	int has_j = 0, has_u = 0, has_e = 0, junk = 0;
+	for (int i = 0; i < 3; i++) {
+		char c = f[i];
+		if (c == 'J') has_j = 1;
+		else if (c == 'U') has_u = 1;
+		else if (c == 'E') has_e = 1;
+		else if (c != ' ' && c != 0) junk = 1;
+	}
+
+	/* older discs spell the region with J/U/E letters. a bare 'E' is
+	   ambiguous with the newer hex bitfield (where E = 14 = europe +
+	   americas + japan-pal), but reading it as europe is right for
+	   european releases and still picks a region the disc supports
+	   either way. multi-region discs prefer US, then EU, then JP -
+	   only reachable when every choice is valid for that disc. */
+	if (!junk && (has_j || has_u || has_e)) {
+		if (has_u) return PHYSCD_REGION_US;
+		if (has_e) return PHYSCD_REGION_EU;
+		return PHYSCD_REGION_JP;
+	}
+
+	/* newer style: hex bitfield, bit0 japan / bit2 americas / bit3 europe */
+	int v = -1;
+	if (f[0] >= '0' && f[0] <= '9') v = f[0] - '0';
+	else if (f[0] >= 'A' && f[0] <= 'F') v = f[0] - 'A' + 10;
+	if (v > 0) {
+		if (v & 4) return PHYSCD_REGION_US;
+		if (v & 8) return PHYSCD_REGION_EU;
+		if (v & 1) return PHYSCD_REGION_JP;
+	}
+
+	return PHYSCD_REGION_UNKNOWN;
+}
+
+physcd_region_t physcd_region()
+{
+	uint8_t user[2048];
+
+	if (!physcd_disc_present()) return PHYSCD_REGION_UNKNOWN;
+	if (pcd.first_data_lba < 0) {
+		toc_t tmp;
+		if (physcd_load_toc(&tmp)) return PHYSCD_REGION_UNKNOWN;
+		if (pcd.first_data_lba < 0) return PHYSCD_REGION_UNKNOWN;
+	}
+
+	if (physcd_read_data2048(pcd.first_data_lba, user)) return PHYSCD_REGION_UNKNOWN;
+	return physcd_region_from_md_header(user, sizeof(user));
+}
+
+const char *physcd_region_name(physcd_region_t r)
+{
+	switch (r) {
+	case PHYSCD_REGION_JP: return "JP";
+	case PHYSCD_REGION_US: return "US";
+	case PHYSCD_REGION_EU: return "EU";
+	default:               return "";
+	}
+}
+
 const char *physcd_disc_name(physcd_disc_t t)
 {
 	switch (t) {

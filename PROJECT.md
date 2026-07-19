@@ -145,6 +145,24 @@ sentinel path convention: `set_image` functions receive the string
   streaming (cache hit/miss, worst miss ms, per-window cursors). first
   thing to check for any "is it the drive?" question.
 
+### operational gotcha: never run a ripper against a mounted drive
+
+once a phys disc is mounted, main holds /dev/srN open and a prefetch
+thread issues SG_IO reads against it. anything else touching the same
+device (cdrdao, dd, zaparoo's optical polling) is then FIGHTING our
+prefetcher for the head - reads slow to a crawl, error recovery
+multiplies, and a cheap usb bridge can wedge hard enough to stop
+responding until it is re-enumerated. `killall MiSTer` (or eject/
+unmount) BEFORE ripping on the device. same reason the anime0t4ku doc
+warns about zaparoo.
+
+if the drive does stop responding: `dmesg | tail -50` is the decisive
+diagnostic (usb resets, "rejecting I/O to offline device", or a
+re-enumeration at a new /dev/srN). recovery ladder is unplug/replug
+(forces clean re-enumeration), then power-cycle the drive, then reboot.
+a bus-powered slim drive brown-out under sustained retry load is the
+other candidate - powered hub, as already listed in the risk table.
+
 ### test hardware and media on hand (2026-07-19)
 
 - de10-nano mister; b0260 slim usb cd drive (qualified: 741 KB/s,

@@ -188,18 +188,38 @@ both fine. the data track reads out at 112,533,504 bytes = 54948
 sectors, which lines up with the 55248-sector track 1 in our toc, so
 the disc is intact too.
 
-cause, by elimination: the fault survived a mister reboot, a replug
-and two other machines, so it was not latched electronic state - it
-was MECHANICAL. the disc had come off the spindle hub. a tray drive
-carried between machines with a disc still loaded will unseat it, and
-an unseated disc gives exactly this signature: motor spins up over and
-over, nothing rotates with it, no media ever detected.
+full sequence, which rules out nearly everything:
+  sonic cd, cdrdao rip fails
+  -> mister: ps1 game FAIL, sonic cd FAIL
+  -> linux tablet: sonic cd + two ps1 games FAIL
+  -> windows pc: sonic cd FAIL
+  -> windows pc: MUSIC CD **WORKS**
+  -> windows pc: sonic cd **WORKS**, and stays working
 
-LESSON: eject before moving a tray drive. and when a drive reports no
-media, cycle the TRAY before suspecting anything electrical - it is
-the one action that forces a real re-evaluation, and it is cheaper
-than the reboot/replug/reseat ladder that will not fix a mechanical
-unseat.
+so it is NOT: mechanical unseating (the tray was cycled many times
+with several discs), usb/power/enumeration (clean throughout), disc
+damage (every disc works now), or os-specific (failed on three).
+
+what is left is drive/bridge firmware state that survived power
+cycles, machine changes and tray cycles - and that a successful read
+CLEARED. note the one disc that worked first was the only CD-DA in
+the set; every failing disc was a data disc. whether audio-vs-data is
+the actual trigger or a coincidence is unproven on one sample, but a
+successful media detection is what reset it.
+
+this drive class has form: the user reports the same behaviour from
+another of these usb optical units previously. treat it as a known
+flakiness of cheap usb optical bridges rather than a fault to chase.
+
+RECOVERY RECIPE (empirical, worked): put a known-good AUDIO CD in. if
+it reads, the drive is unstuck and data discs work again. do that
+before rebooting, replugging or condemning the drive - none of those
+fixed it here.
+
+possible small enhancement, NOT yet implemented: when physcd_open
+finds a drive present but physcd_load_toc keeps failing with no
+medium, print that recovery hint rather than a bare error. cheap, and
+this has now cost real debugging time twice.
 
 ### test hardware and media on hand (2026-07-19)
 

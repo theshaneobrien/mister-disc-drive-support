@@ -269,7 +269,15 @@ static int core_running(const char *name)
 	return !strcasecmp(cur, name);
 }
 
-static void on_disc(disc_t type)
+/* trailing digit of /dev/srN, so mount_phys pins the same drive we
+   just fingerprinted rather than letting main autodetect a different one */
+static int dev_index(const char *dev)
+{
+	const char *p = dev + strlen(dev) - 1;
+	return (*p >= '0' && *p <= '9') ? *p - '0' : 0;
+}
+
+static void on_disc(disc_t type, const char *dev)
 {
 	char rbf[1024];
 
@@ -298,27 +306,56 @@ static void on_disc(disc_t type)
 		sleep(3);                               /* let the core init + bios load */
 	}
 
-	fifo_cmd("mount_phys 0");
+	fifo_cmd("mount_phys %d", dev_index(dev));
 }
 
 // ---------------------------------------------------------------- main
 
+/* usb enumeration order shifts across reboots (the same drive shows up
+   as sr0 one boot, sr1 the next), so rescan every time we reopen.
+   O_NONBLOCK keeps the drive door usable. */
+static int open_drive(char *dev, int devsz, const char *pinned)
+{
+	char path[64];
+	int spare = -1;
+
+	if (pinned && *pinned) {
+		int fd = open(pinned, O_RDONLY | O_NONBLOCK);
+		if (fd >= 0) { snprintf(dev, devsz, "%s", pinned); return fd; }
+	}
+
+	for (int i = 0; i < 8; i++) {
+		snprintf(path, sizeof(path), "/dev/sr%d", i);
+		int fd = open(path, O_RDONLY | O_NONBLOCK);
+		if (fd < 0) continue;
+		if (ioctl(fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) == CDS_DISC_OK) {
+			snprintf(dev, devsz, "%s", path);
+			if (spare >= 0) close(spare);
+			return fd;
+		}
+		if (spare < 0) { spare = fd; snprintf(dev, devsz, "%s", path); }
+		else close(fd);
+	}
+	return spare;
+}
+
 int main(int argc, char **argv)
 {
-	char dev[256] = "/dev/sr0";
+	char pinned[256] = "";
+	char dev[256] = "";
 	int last = -1;
 
-	if (argc > 1) snprintf(dev, sizeof(dev), "%s", argv[1]);
-	else ini_lookup("device", dev, sizeof(dev));
+	if (argc > 1) snprintf(pinned, sizeof(pinned), "%s", argv[1]);
+	else ini_lookup("device", pinned, sizeof(pinned));
 
-	log_line("physcdd started, watching %s", dev);
+	log_line("physcdd started, watching %s", pinned[0] ? pinned : "/dev/sr0../dev/sr7 (autodetect)");
 
 	int fd = -1;
 	for (;;) {
 		if (fd < 0) {
-			/* O_NONBLOCK open doesn't lock the drive door */
-			fd = open(dev, O_RDONLY | O_NONBLOCK);
+			fd = open_drive(dev, sizeof(dev), pinned);
 			if (fd < 0) { sleep(5); continue; }
+			log_line("using %s", dev);
 		}
 
 		int status = ioctl(fd, CDROM_DRIVE_STATUS, CDSL_CURRENT);
@@ -333,7 +370,7 @@ int main(int argc, char **argv)
 		}
 
 		if (status == CDS_DISC_OK && (last != CDS_DISC_OK || changed))
-			on_disc(identify(fd));
+			on_disc(identify(fd), dev);
 
 		last = status;
 		sleep(2);

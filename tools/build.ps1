@@ -16,11 +16,14 @@ if ($LASTEXITCODE) { exit 1 }
 if ($Clean) { docker volume rm -f mister-objcache | Out-Null }
 docker volume create mister-objcache | Out-Null
 
+# NB: don't pipe make through grep under `set -e` - grep exits 1 when it
+# finds nothing, which aborts the script before the binary is copied out.
 docker run --rm -v "${repo}:/src" -v mister-objcache:/work mister-armcc bash -c @'
 set -e
 rsync -a --delete --exclude=.git --exclude=bin /src/ /work/src/
 cd /work/src
-make -j$(nproc)
+make -j$(nproc) 2>&1 | tee /tmp/build.log | tail -5
+grep -iE "warning|error" /tmp/build.log || echo "(no warnings)"
 mkdir -p /src/bin
 cp bin/MiSTer bin/MiSTer.elf /src/bin/
 echo "== build ok: bin/MiSTer =="

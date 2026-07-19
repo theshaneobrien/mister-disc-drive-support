@@ -246,6 +246,31 @@ known narrow race, deferred to phase 7 disc swap: a fill_cache in
 flight during physcd_load_toc can land old-disc sectors in freshly
 invalidated slots. harmless in v1 (no swap support).
 
+#### 2026-07-19 later: cache fix CONFIRMED, then a device-naming bug
+
+/tmp/physcd_stats.log from the fixed binary during sonic cd:
+`hit 750 miss 0  hitrate 100.0%  worst miss 0 ms`, both windows active
+(data cursor 169, cdda cursor 147006). the two-window split works -
+mixed-mode streaming is now a perfect hit rate.
+
+then a reboot renamed the drive /dev/sr0 -> /dev/sr1 and nothing
+mounted: PHYSCD_DEV_DEFAULT was hardcoded and physcd_open(NULL) just
+failed. usb enumeration order is NOT stable, never assume a name.
+fixed (commit 82a6d16):
+- backend scans /dev/sr0../dev/sr7 and prefers a drive with media;
+  physcd_set_device() pins one explicitly; physcd_open reopens if the
+  pinned device differs from the current one.
+- `mount_phys <n>` now means DRIVE n (/dev/srN) - the intuitive
+  reading, and what a user trying to work around this reaches for.
+  bare `mount_phys` autodetects. it used to be the image-slot index,
+  which mcd_set_image ignores entirely, so the arg did nothing.
+- physcdd autodetects the same way and sends `mount_phys <n>` for the
+  drive it actually fingerprinted.
+- mcd_set_image: the phys sentinel is one fixed string, so remounting
+  always looked like `same_game` and skipped the bios load + reset.
+  after a FAILED mount that meant retries could never recover. phys
+  mounts now always re-init.
+
 ### phase 4: mount_phys command [code done]
 - input.cpp fifo handler: `mount_phys <idx>` dispatches by core type
   like the user_io.cpp boot-config block (is_megacd -> mcd_set_image

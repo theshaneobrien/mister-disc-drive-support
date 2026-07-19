@@ -1,4 +1,4 @@
-# mister physcd: physical usb cd-rom support for MiSTer FPGA
+﻿# mister physcd: physical usb cd-rom support for MiSTer FPGA
 
 project handoff doc. self-contained: everything verified so far, the
 architecture, and a phased task list with acceptance criteria. companion
@@ -411,12 +411,36 @@ test media ON HAND (2026-07-19): psx, saturn, neogeo cd, pc dos
 on acquiring media, so it moves to the back regardless of difficulty.
 
 order:
-1. **psx** - mind the 150-sector pregap bias in its toc convention
-   (see PATCHPOINTS.md). prior art confirms mister psx lbas already
-   include the 150 lead-in, so the drive's absolute lbas map directly.
-   subchannel works on this drive, so libcrypt titles may not need
-   .sbi at all - a differentiator vs both public forks, neither of
-   which implements subchannel.
+1. **psx** - CODE DONE (commit c384cf6), untested on hardware.
+   what the integration turned out to need:
+   - toc convention differs from megacd in TWO ways, not one. psx
+     uses INCLUSIVE track ends (`lba >= start && lba <= end`) where
+     megacd/physcd use exclusive, AND fakes a 150-sector pregap so
+     core lba 150 is the first sector of track 1. `load_phys()`
+     converts both, shifting every track by the same 150 so
+     `psx_read_cd` subtracts one uniform bias - matching what the
+     chd branch already does (`lba - toc.tracks[0].indexes[1]`).
+   - indexes[1] stays 0 on later tracks: the drive reports each start
+     as its INDEX 1 position, so no further correction applies.
+     `pregap` stays 0 too - a cue whose file omits the gap has to
+     fake zeros, but a real disc HAS those sectors, so just read them.
+   - region + game id come free: psx_get_region reads sector 154 and
+     psx_get_game_info parses iso9660 at lba 172, both through
+     psx_read_cd, so both work on a physical mount with no plumbing.
+     that also makes the sbi.zip/<game_id>.sbi lookup work, so
+     libcrypt titles are covered by the existing mechanism.
+   - a physical disc has no path, and the sentinel is not a legal
+     filename, so saves/savestates/gameid key off the disc's own game
+     id instead. NOTE file-backed psx games key the memory card off
+     the game FOLDER (psx_mount_save(last_dir)), so a physical copy
+     and a ripped copy of the same game get SEPARATE memory cards.
+     unavoidable - a disc cannot know what folder you filed its rip
+     under - but worth documenting.
+   - no bios work needed unlike megacd: psx sends region to the core
+     in the disk metadata block, so the core adjusts itself.
+   subchannel works on this drive, so real libcrypt (rather than .sbi)
+   remains open as a phase 7 improvement - a differentiator vs both
+   public forks, neither of which implements subchannel.
 2. **saturn** - same trio as megacd, same rules.
 3. **neogeo cd** - the open question is whether it streams sectors via
    the toc or parses iso9660 for files. if filesystem: prefer a small

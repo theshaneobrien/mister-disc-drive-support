@@ -1,4 +1,4 @@
-# physcd fork integration map
+﻿# physcd fork integration map
 
 verified against Main_MiSTer master, 2026-07-19. all line refs approximate.
 
@@ -47,18 +47,34 @@ pattern is identical everywhere: every read function already branches
   HomeDir, and skip `mcd_mount_save(filename)` path games use
   -> mount save keyed on disc serial or a fixed "physical" save. v1: fixed name.
 
-### psx
+### psx - APPLIED (commit c384cf6), untested on hardware
 
 `support/psx/psx.cpp`:
-- `load_cd_image()` (~333): phys branch -> `physcd_load_toc(table)`.
-  note psx toc convention: fake 150-sector pregap, `indexes[1]` used for
-  lba bias (see `psx_read_cd` chd branch). drive TOC lbas are already
-  absolute (include the 150), so set `tracks[0].indexes[1] = 150` and keep
-  starts as-is; verify against a real disc, this is the one fiddly spot.
-- `psx_read_cd()` (~474): phys branch -> `physcd_read_sector(lba - bias, buffer, NULL)`
-  per sector. no byteswap (mirror file branch). pregap faking block stays.
-- libcrypt: needs accurate subchannel. backend probes drive capability;
-  if unsupported keep the existing .sbi mechanism working by disc serial.
+- `load_phys()` (new, next to load_chd/load_cue) + a sentinel branch at
+  the top of `load_cd_image()`. the toc transform is the fiddly part and
+  differs from megacd in TWO ways:
+    * psx ends are INCLUSIVE (`lba >= start && lba <= end`), physcd
+      hands back exclusive ends -> `end = start + len - 1`
+    * psx fakes a 150-sector pregap so core lba 150 == first sector of
+      track 1 -> shift EVERY track start by 150, keeping one uniform
+      bias that `psx_read_cd` undoes
+  `tracks[0].indexes[1] = 150` (the bias, as the chd branch expects),
+  `indexes[1] = 0` on later tracks (the drive already reports index 1
+  positions), `pregap = 0` everywhere (a real disc HAS the gap sectors,
+  so never fake zeros for them).
+- `psx_read_cd()`: phys branch before the chd branch ->
+  `physcd_read_sector(lba - toc.tracks[0].indexes[1], buffer, NULL)`.
+  no byteswap (mirror the file branch). seek hint replaces the FileSeek
+  block for phys.
+- `psx_mount_cd()`: sentinel -> substitute the disc's game id as a
+  stand-in filename for saves / savestates / gameid (the sentinel is not
+  a legal path). skip the per-folder cd_bios.rom lookup and the
+  image-relative .sbi lookup; the sbi.zip/<game_id>.sbi lookup still
+  works. always re-init (one fixed sentinel would look like same_game).
+- region and game id need NO work: both are read from the disc through
+  `psx_read_cd`, so they work as soon as the phys read branch exists.
+- libcrypt: the .sbi path works via game id. real subchannel-based
+  libcrypt is a phase 7 improvement (this drive supports raw subchannel).
 
 ### saturn
 

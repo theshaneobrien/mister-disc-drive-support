@@ -38,6 +38,24 @@
 #define STATS_MS 5000
 
 /*
+ * a cache miss is serviced ON THE MAIN THREAD, which is also the thread
+ * answering the fpga. so every path a miss can take must be bounded:
+ * an 8s timeout with 3 retries over a 16-sector burst is ~6 MINUTES of
+ * frozen main loop on a disc that reads badly, which presents as the
+ * whole mister locking up with no osd and no input.
+ *
+ * so the consumer path gets ONE attempt, a small burst and a timeout
+ * just above the worst seek seen on real media (2.5s on a marginal psx
+ * disc), and gives up to zeros instead of retrying. retries and the
+ * cooked fallback belong to the prefetch thread, where blocking is
+ * free. sync_pending lets that thread yield rather than make the
+ * consumer queue behind a slow background read.
+ */
+#define SYNC_BURST 8
+#define SYNC_TIMEOUT_MS 3000
+#define BG_TIMEOUT_MS 3000
+
+/*
  * mixed-mode discs read two streams at once: the core pulls animation
  * or game data from a data track while cdda plays from an audio track
  * thousands of sectors away (sonic cd's intro is the canonical case).
@@ -72,6 +90,7 @@ static struct {
 	volatile int cursor[NWIN];    /* prefetch position, per window  */
 	volatile int wactive[NWIN];
 	volatile int running;
+	volatile int sync_pending;    /* consumer waiting: prefetch yields */
 	pthread_t thread;
 	pthread_mutex_t lock;         /* guards cache slots             */
 	pthread_mutex_t io;           /* one drive transaction at a time */
@@ -80,7 +99,7 @@ static struct {
 	uint32_t st_bad_logged;
 	double st_worst_ms;           /* worst consumer-visible miss    */
 	double st_worst_io_ms;        /* worst drive transaction        */
-} pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0,
+} pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
 	  0, 0, 0, 0, 0.0, 0.0 };
 
@@ -111,7 +130,7 @@ static double now_ms()
 
 // ---------------------------------------------------------------- reads
 
-static int sg_read_cd(int lba, int count, uint8_t flags, int with_sub, uint8_t *dst)
+static int sg_read_cd(int lba, int count, uint8_t flags, int with_sub, uint8_t *dst, int timeout_ms)
 {
 	uint8_t cdb[12] = { 0 };
 	uint8_t sense[32];
@@ -138,7 +157,7 @@ static int sg_read_cd(int lba, int count, uint8_t flags, int with_sub, uint8_t *
 	io.dxferp = dst;
 	io.sbp = sense;
 	io.mx_sb_len = sizeof(sense);
-	io.timeout = 8000;
+	io.timeout = timeout_ms;
 
 	if (ioctl(pcd.fd, SG_IO, &io) < 0) return -1;
 	if (io.status || io.host_status || io.driver_status) return -2;
@@ -169,7 +188,7 @@ static int cooked_read_raw(int lba, uint8_t *dst)
 // bursts are clamped at track boundaries so one transaction never
 // mixes data and cd-da. degrades to single-sector retries, then the
 // cooked path, so one bad sector doesn't poison the whole burst.
-static int fill_cache(int lba, int count)
+static int fill_cache(int lba, int count, int sync)
 {
 	uint8_t burst[BURST * SLOT_SIZE];     /* stack: both threads call here */
 
@@ -189,18 +208,63 @@ static int fill_cache(int lba, int count)
 	   both take longer than they would serialized */
 	double io0 = now_ms();
 	pthread_mutex_lock(&pcd.io);
-	int r = sg_read_cd(lba, count, flags, with_sub, burst);
+	int r = sg_read_cd(lba, count, flags, with_sub, burst,
+		sync ? SYNC_TIMEOUT_MS : BG_TIMEOUT_MS);
 	pthread_mutex_unlock(&pcd.io);
+
+	if (r && sync) {
+		/* bounded: give up immediately rather than block the thread
+		   that is also answering the fpga. the prefetcher will come
+		   back to these sectors with retries and the cooked fallback. */
+		pthread_mutex_lock(&pcd.lock);
+		for (int i = 0; i < count; i++) {
+			slot_t *s = slot_for(lba + i);
+			memset(s->data, 0, SLOT_SIZE);
+			s->has_sub = 0;
+			s->bad = 1;
+			s->lba = lba + i;
+			pcd.st_bad++;
+		}
+		pthread_mutex_unlock(&pcd.lock);
+		double dt = now_ms() - io0;
+		if (dt > pcd.st_worst_io_ms) pcd.st_worst_io_ms = dt;
+		return 0;
+	}
+
+	if (r && with_sub && count > 1) {
+		/* the subchannel probe only ever reads ONE sector, and some
+		   usb bridges accept that but reject a multi-sector transfer
+		   with subchannel appended - which would fail every burst and
+		   send us into the retry path forever. re-try the same burst
+		   plain before condemning any sectors, and if that works,
+		   drop subchannel for the rest of the session. */
+		pthread_mutex_lock(&pcd.io);
+		int r2 = sg_read_cd(lba, count, flags, 0, burst, BG_TIMEOUT_MS);
+		pthread_mutex_unlock(&pcd.io);
+		if (!r2) {
+			printf("physcd: drive rejects multi-sector subchannel reads, disabling subchannel\n");
+			pcd.sub_ok = 0;
+			with_sub = 0;
+			r = 0;
+		}
+	}
 
 	if (r) {
 		for (int i = 0; i < count; i++) {
 			uint8_t one[SLOT_SIZE];
 			int rr = -1;
-			pthread_mutex_lock(&pcd.io);
-			for (int n = 0; n < 3 && rr; n++)
-				rr = sg_read_cd(lba + i, 1, flags, 0, one);
-			if (rr) rr = cooked_read_raw(lba + i, one);
-			pthread_mutex_unlock(&pcd.io);
+			/* lock per ATTEMPT, not around the whole retry loop: a
+			   consumer miss must never queue behind a retry storm */
+			for (int n = 0; n < 3 && rr; n++) {
+				pthread_mutex_lock(&pcd.io);
+				rr = sg_read_cd(lba + i, 1, flags, 0, one, BG_TIMEOUT_MS);
+				pthread_mutex_unlock(&pcd.io);
+			}
+			if (rr) {
+				pthread_mutex_lock(&pcd.io);
+				rr = cooked_read_raw(lba + i, one);
+				pthread_mutex_unlock(&pcd.io);
+			}
 			pthread_mutex_lock(&pcd.lock);
 			slot_t *s = slot_for(lba + i);
 			if (!rr) {
@@ -307,13 +371,21 @@ static void *prefetch_thread(void *arg)
 			last_stats = now_ms();
 		}
 
+		/* a consumer read is waiting: do not start a new transaction
+		   and make it queue behind us */
+		if (pcd.sync_pending) {
+			struct timespec ts = { 0, 2 * 1000 * 1000 };
+			nanosleep(&ts, NULL);
+			continue;
+		}
+
 		if (target < 0) {
 			/* both windows full (or no toc yet): check again soon */
 			struct timespec ts = { 0, 20 * 1000 * 1000 };
 			nanosleep(&ts, NULL);
 			continue;
 		}
-		fill_cache(target, BURST);
+		fill_cache(target, BURST, 0);
 	}
 	return NULL;
 }
@@ -434,8 +506,8 @@ static void probe_subchannel(int lba)
 	int t = track_of(lba);
 	uint8_t flags = (t >= 0 && pcd.trk[t].audio) ? 0x10 : 0xF8;
 
-	if (!sg_read_cd(lba, 1, flags, 1, buf)) { pcd.sub_ok = 1; return; }
-	if (!sg_read_cd(lba, 1, flags, 0, buf)) { pcd.sub_ok = 0; return; }
+	if (!sg_read_cd(lba, 1, flags, 1, buf, BG_TIMEOUT_MS)) { pcd.sub_ok = 1; return; }
+	if (!sg_read_cd(lba, 1, flags, 0, buf, BG_TIMEOUT_MS)) { pcd.sub_ok = 0; return; }
 	pcd.sub_ok = -1;                  /* couldn't tell, retry later */
 }
 
@@ -556,9 +628,12 @@ int physcd_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
 		return 0;
 	}
 
-	/* cache miss: synchronous burst fill, then serve               */
+	/* cache miss: bounded synchronous fill, then serve             */
 	double t0 = now_ms();
-	if (fill_cache(lba, BURST)) return -1;
+	pcd.sync_pending++;
+	int fr = fill_cache(lba, SYNC_BURST, 1);
+	pcd.sync_pending--;
+	if (fr) return -1;
 
 	pthread_mutex_lock(&pcd.lock);
 	s = slot_for(lba);

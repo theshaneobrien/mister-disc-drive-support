@@ -7,6 +7,7 @@
 
 #include "megacd.h"
 #include "../chd/mister_chd.h"
+#include "../physcd/mister_physcd.h"
 
 cdd_t cdd;
 
@@ -246,7 +247,14 @@ int cdd_t::Load(const char *filename)
 	Unload();
 
 	const char *ext = filename+strlen(filename)-4;
-	if (!strncasecmp(".cue", ext, 4))
+	if (!strcmp(filename, PHYSCD_SENTINEL))
+	{
+		if (physcd_open(NULL) || physcd_load_toc(&this->toc))
+		{
+			printf("\x1b[32mMCD: no readable physical disc\n\x1b[0m");
+			return (-1);
+		}
+	} else if (!strncasecmp(".cue", ext, 4))
 	{
 		if (LoadCUE(filename)) {
 			return (-1);
@@ -271,7 +279,12 @@ int cdd_t::Load(const char *filename)
 
 	}
 
-	if (this->toc.chd_f)
+	if (this->toc.phys)
+	{
+		/* raw drive reads always deliver 2352-byte sectors, the
+		   backend already set tracks[0].sector_size accordingly */
+	}
+	else if (this->toc.chd_f)
 	{
 		mister_chd_read_sector(this->toc.chd_f, 0, 0, 0, 0x10, (uint8_t *)header, this->chd_hunkbuf, &this->chd_hunknum);
 	} else {
@@ -313,6 +326,11 @@ void cdd_t::Unload()
 {
 	if (this->loaded)
 	{
+		if (this->toc.phys)
+		{
+			physcd_close();
+		}
+
 		if (this->toc.chd_f)
 		{
 			chd_close(this->toc.chd_f);
@@ -484,7 +502,11 @@ void cdd_t::Update() {
 
 		if (this->toc.sub.opened()) FileSeek(&this->toc.sub, this->lba * 96, SEEK_SET);
 
-		if (this->toc.tracks[this->index].type)
+		if (this->toc.phys)
+		{
+			physcd_seek_hint(this->lba);
+		}
+		else if (this->toc.tracks[this->index].type)
 		{
 			// DATA track
 			FileSeek(&this->toc.tracks[0].f, this->lba * this->sectorSize, SEEK_SET);
@@ -894,7 +916,13 @@ void cdd_t::SeekToLBA(int lba, int play) {
 		lba = this->toc.tracks[index].start;
 	}
 
-	if (this->toc.tracks[index].type)
+	if (this->toc.phys)
+	{
+		/* kick the prefetch now: the modeled seek latency below is
+		   the real drive's head start */
+		physcd_seek_hint(lba);
+	}
+	else if (this->toc.tracks[index].type)
 	{
 		/* DATA track */
 		FileSeek(&this->toc.tracks[0].f, lba * this->sectorSize, SEEK_SET);
@@ -920,7 +948,11 @@ void cdd_t::ReadData(uint8_t *buf)
 	if (this->toc.tracks[this->index].type && (this->lba >= 0))
 	{
 
-		if (this->toc.chd_f)
+		if (this->toc.phys)
+		{
+			physcd_read_data2048(this->lba, buf);
+		}
+		else if (this->toc.chd_f)
 		{
 			int read_offset = 0;
 			if (this->sectorSize != 2048)
@@ -954,7 +986,21 @@ int cdd_t::ReadCDDA(uint8_t *buf)
 		return this->audioLength;
 	}
 
-	if (this->toc.chd_f)
+	if (this->toc.phys)
+	{
+		/* drive returns cdda little-endian like bin files: mirror the
+		   file branch, NO byteswap (that block is chd-only) */
+		for (int i = 0; i < this->audioLength / 2352; i++)
+		{
+			physcd_read_sector(this->chd_audio_read_lba + i, buf + 2352 * i, NULL);
+		}
+
+		if ((this->audioLength / 2352) > 1)
+		{
+			this->chd_audio_read_lba++;
+		}
+	}
+	else if (this->toc.chd_f)
 	{
 		for(int i = 0; i < this->audioLength / 2352; i++)
 		{
@@ -1001,7 +1047,20 @@ int cdd_t::ReadSubcode(uint16_t* buf)
 {
 	int err = 0;
 	uint8_t subc[96];
-	if (this->toc.chd_f)
+	if (this->toc.phys)
+	{
+		uint8_t rawsec[2352];
+		if (!physcd_sub_supported() ||
+		    physcd_read_sector(this->chd_audio_read_lba, rawsec, subc))
+		{
+			err = -1;	/* same as the "no sub file" path */
+		}
+		else
+		{
+			InterleaveSubcode(subc, buf);
+		}
+	}
+	else if (this->toc.chd_f)
 	{
 		//Just use the read sector call with an offset, since we previously read that sector, it is already in the hunk cache
 		if (this->toc.tracks[this->index].sbc_type == SUBCODE_RW_RAW) {

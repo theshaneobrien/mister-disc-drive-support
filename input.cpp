@@ -30,6 +30,7 @@
 #include "audio.h"
 #include "joymapping.h"
 #include "support.h"
+#include "support/physcd/mister_physcd.h"
 #include "profiling.h"
 #include "gamecontroller_db.h"
 #include "str_util.h"
@@ -6263,6 +6264,26 @@ int input_test(int getchar)
 						if (!strcmp(cmd + 7, "mute")) set_volume(0x81);
 						else if (!strcmp(cmd + 7, "unmute")) set_volume(0x80);
 						else if (cmd[7] >= '0' && cmd[7] <= '7') set_volume(0x40 - 0x30 + cmd[7]);
+					}
+					else if (!strncmp(cmd, "mount_phys", 10))
+					{
+						// mount the physical cd drive into the running cd core
+						const char *p = cmd + 10;
+						while (*p == ' ' || *p == '\t') p++;
+						int idx = (*p >= '0' && *p <= '9') ? *p - '0' : 0;
+
+						if (is_megacd())
+						{
+							mcd_set_image(idx, PHYSCD_SENTINEL);
+						}
+						else if (is_psx() || is_saturn() || is_pce() || is_neogeo_cd() || is_x86())
+						{
+							printf("physcd: core '%s' not supported yet\n", user_io_get_core_name());
+						}
+						else
+						{
+							printf("physcd: no physical CD support for core '%s'\n", user_io_get_core_name());
+						}
 					}
 				}
 			}

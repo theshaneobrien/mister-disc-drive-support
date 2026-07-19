@@ -11,6 +11,7 @@
 #include "../../menu.h"
 #include "../../cheats.h"
 #include "megacd.h"
+#include "../physcd/mister_physcd.h"
 
 #define SAVE_IO_INDEX 5 // fake download to trigger save loading
 
@@ -168,10 +169,19 @@ void mcd_set_image(int num, const char *filename)
 
 			if (!same_game)
 			{
-				mcd_load_rom(filename, "cd_bios.rom", 0);
-				mcd_load_rom(filename, "cart.rom", 1);
-				mcd_mount_save(filename);
-				cheats_init(filename, 0);
+				if (!strcmp(filename, PHYSCD_SENTINEL))
+				{
+					/* no game folder on a physical disc: fixed save
+					   name, no per-game bios/cart/cheats lookup */
+					mcd_mount_save("physcd.sav");
+				}
+				else
+				{
+					mcd_load_rom(filename, "cd_bios.rom", 0);
+					mcd_load_rom(filename, "cart.rom", 1);
+					mcd_mount_save(filename);
+					cheats_init(filename, 0);
+				}
 			}
 		}
 		else

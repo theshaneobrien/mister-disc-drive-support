@@ -26,6 +26,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <inttypes.h>
 #include <ctype.h>
 #include <string.h>
+#include <signal.h>
 #include "menu.h"
 #include "user_io.h"
 #include "input.h"
@@ -37,8 +38,33 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 const char *version = "$VER:" VDATE;
 
+// print the fault address to stderr (unbuffered, so it survives) and
+// die with the default action so the shell still reports the signal
+static void fault_handler(int sig, siginfo_t *si, void *ctx)
+{
+	(void)ctx;
+	char msg[96];
+	int n = snprintf(msg, sizeof(msg), "\n*** %s at address %p ***\n",
+		sig == SIGBUS ? "SIGBUS" : "SIGSEGV", si->si_addr);
+	if (n > 0) write(2, msg, n);
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
 int main(int argc, char *argv[])
 {
+	// line-buffer stdout even when redirected to a file: with the
+	// default 4KB block buffering a crash eats every queued printf,
+	// which turned a segfault hunt into archaeology during physcd
+	// bring-up. costs nothing on the serial console.
+	setvbuf(stdout, NULL, _IOLBF, 0);
+
+	struct sigaction sa = {};
+	sa.sa_sigaction = fault_handler;
+	sa.sa_flags = SA_SIGINFO;
+	sigaction(SIGSEGV, &sa, NULL);
+	sigaction(SIGBUS, &sa, NULL);
+
 	// Always pin main worker process to core #1 as core #0 is the
 	// hardware interrupt handler in Linux.  This reduces idle latency
 	// in the main loop by about 6-7x.

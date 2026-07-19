@@ -301,7 +301,32 @@ disc/chd), so it does not implicate the backend. leading hypothesis:
 "periodic stutter on top of low fps", real pal hardware on a pal tv
 at 50hz doesn't, and an ntsc chd at 60-on-60 doesn't either.
 
+#### 2026-07-19: the disc itself is a suspect (competing hypothesis)
+
+cdrdao ripping this disc stalls hard around 47:10:00 (lba ~212250, in
+the audio tracks near the OUTER edge), audibly retrying for 30-60s per
+minute of audio. that region is physically marginal.
+
+this exposed a hole in the telemetry that invalidated my earlier "the
+backend is exonerated" claim: unreadable sectors are zero-filled and
+the slot is then marked VALID, so every later read of it counts as a
+cache HIT. if the prefetch thread is the one that hit the bad sectors,
+no miss and no latency are recorded either. a rotting disc could
+therefore report a flawless 100% hit rate while feeding the core
+silent zeros. fixed in commit 9df265b - stats now report `BAD n
+sectors served as zeros` (cumulative per mount) and worst drive io ms.
+
+so there are now TWO live hypotheses for the stutter, distinguishable
+by one number:
+  BAD == 0  -> reads are clean, stutter is timing/video (pal cadence)
+  BAD  > 0  -> disc damage; the core is getting zeroed sectors
+note the fmv data lives in the data track at the INNER edge, which
+cdrdao got through fine, so pal cadence remains the front-runner - but
+this is now measured rather than assumed.
+
 next experiments, in order of effort:
+0. redeploy and read the BAD count during the stuttering intro. this
+   is now the cheapest and most decisive single number.
 1. zero effort: check MiSTer.ini vsync_adjust and whether the display
    is running 50hz for this core; check the megacd osd region setting
    and which bios boot.rom actually is (eu bios for a pal disc).
@@ -434,6 +459,7 @@ not a plan.
 | cold seeks exceed modeled latency | seek hint at cdd command time + 10MB prefetch; if still short, add optional "instant seek off" tolerance testing |
 | index >1 audio positions (rare games) | drive toc lacks index marks; accept as known limitation, document |
 | usb power spikes on spin-up | powered hub, document requirement |
+| aging/rotting discs read marginally, esp. outer edge | backend zero-fills after retries so the core never hangs, and now COUNTS it (stats `BAD`) so it can't masquerade as a clean read. possible enhancement: we currently request CDROM_SELECT_SPEED 0 = MAXIMUM, which is right for prefetch headroom on a good disc but wrong for a marginal one - slower reads recover more. consider dropping speed adaptively once BAD goes nonzero |
 | upstream drift | keep all changes behind toc.phys / sentinel; rebase quarterly |
 | neogeo needs iso9660 | prefer tiny userspace iso9660 reader over kernel module to keep "stock kernel" property; the same reader is needed for psx achievement hashing, so it pays for itself twice |
 | RA fork and our fork claim the same /media/fat/MiSTer slot | merge the two forks (phase 8), do it early and rebase often; two-binary switcher only as a retreat |

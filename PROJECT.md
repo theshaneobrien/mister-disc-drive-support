@@ -150,18 +150,41 @@ sentinel path convention: `set_image` functions receive the string
 once a phys disc is mounted, main holds /dev/srN open and a prefetch
 thread issues SG_IO reads against it. anything else touching the same
 device (cdrdao, dd, zaparoo's optical polling) is then FIGHTING our
-prefetcher for the head - reads slow to a crawl, error recovery
-multiplies, and a cheap usb bridge can wedge hard enough to stop
-responding until it is re-enumerated. `killall MiSTer` (or eject/
-unmount) BEFORE ripping on the device. same reason the anime0t4ku doc
-warns about zaparoo.
+prefetcher for the head - reads slow to a crawl and error recovery
+multiplies. `killall MiSTer` before ripping ON the mister. same reason
+the anime0t4ku doc warns about zaparoo. (recorded as general practice;
+it was NOT the cause of the 2026-07-19 drive failure below, where the
+rip ran on a separate pc with the drive moved to it.)
 
-if the drive does stop responding: `dmesg | tail -50` is the decisive
-diagnostic (usb resets, "rejecting I/O to offline device", or a
-re-enumeration at a new /dev/srN). recovery ladder is unplug/replug
-(forces clean re-enumeration), then power-cycle the drive, then reboot.
-a bus-powered slim drive brown-out under sustained retry load is the
-other candidate - powered hub, as already listed in the risk table.
+### 2026-07-19: drive stopped reading after a marathon cdrdao rip
+
+symptoms, in the order observed: disc spinning up over and over (not
+as loud as the cdrdao grind); `physcd_probe` reporting drive NOT READY;
+then after a remount reporting drive status OK but failing
+CDROMREADTOCHDR - no toc. /dev/sr0 enumerates normally on a rebooted
+mister with the drive attached.
+
+what that rules OUT: usb enumeration, the bridge, power delivery, and
+device naming are all fine - the drive is present, claims media, and
+answers ioctls. this is a READ capability failure, not a plumbing one.
+
+the toc lives in the lead-in at the INNER edge, and repeated spin-up
+cycles are what a drive does when it cannot focus/lock there. so the
+suspects are (a) that specific disc's lead-in, or (b) the drive's
+optics/calibration after an hour of continuous retry (slim usb drives
+run hot; thermal drift is real).
+
+decisive test is a DIFFERENT, healthy disc - and the same drive on the
+pc it was just ripping on, which cross-checks drive health independent
+of the mister entirely. matrix:
+  other disc works on mister -> drive fine, that disc's lead-in is gone
+  no disc works on mister but works on pc -> mister-side, investigate
+  nothing works anywhere -> drive; let it cool, then replace
+`dmesg | tail -50` distinguishes further: sense keys of NOT READY vs
+MEDIUM ERROR separate "cannot spin up / focus" from "read it, bad data".
+
+do not judge drive health with the PAL sonic cd - cdrdao already
+showed it to be marginal at the outer edge.
 
 ### test hardware and media on hand (2026-07-19)
 

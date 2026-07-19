@@ -1,0 +1,252 @@
+# mister physcd: physical usb cd-rom support for MiSTer FPGA
+
+project handoff doc. self-contained: everything verified so far, the
+architecture, and a phased task list with acceptance criteria. companion
+files ship alongside this doc:
+
+- `physcd_probe.c` + `physcd_probe` (prebuilt static armhf binary)
+- `mister_physcd.h` / `mister_physcd.cpp` (backend scaffold, superseded
+  by the copy in the fork, kept for reference)
+- `PATCHPOINTS.md` (per-core integration map, treat as part of this doc)
+- `physcdd.c` + `physcdd` (phase 5 autodetect daemon, static armhf)
+- `Main_MiSTer/` (the fork, branch `physcd`, builds clean)
+- `tools/` (windows docker cross-compile: `.\tools\build.ps1`)
+
+## 0. status as of 2026-07-19
+
+phases 2-5 are CODE-COMPLETE and compiling (commit 1afcd2f on branch
+`physcd`); phase 1 (hardware validation) is now the only blocker and
+needs the physical mister + b0260 + discs. deploy `bin/MiSTer` +
+`physcd_probe` + `physcdd` and follow section 5.
+
+prior art update (supersedes section 2 item 9): two public gpl
+implementations exist and were mined for drive quirks -
+- github.com/Anime0t4ku/Main_MiSTer_Physical_Disc (pushed 2026-07-19!):
+  mature megacd+psx backend. key stolen ideas: READ CD flags byte per
+  track type (0xF8 data / 0x10 cdda, both 2352b), CDROMREADRAW cooked
+  fallback for bridges that reject raw MMC, CDROM_SELECT_SPEED 0,
+  prefetch thread affinity on both cores (main() pins itself to cpu1).
+  psx toc bias confirmed: mister lbas already include the 150 lead-in.
+  no subchannel support (ours probes and uses it when the drive can).
+- github.com/sidneivl/Main_MiSTer branch feature/use-cdrom (the forum
+  t=10235 dev): cruder reads but has the autodetect daemon pattern
+  (2s CDROM_DRIVE_STATUS poll, newest-rbf resolution, door-open faking).
+- retro-remake / taki udon have published NOTHING (superdock disc boot
+  has not shipped; no gpl trigger). nothing to wait for there.
+- full diffs saved by the research agent; see also
+  /tmp scratchpad copies referenced in the session log.
+
+if zaparoo is installed on the mister, disable its optical polling -
+it fights over /dev/sr0 (anime0t4ku doc warning).
+
+## 1. goal
+
+fork Main_MiSTer so cd-based cores (megacd first, then psx, saturn,
+pcecd, neogeo cd, ao486) can boot games directly from a physical usb
+cd-rom drive, with automatic disc-type detection and automatic
+core-load + mount on disc insert. target hardware: DE10-nano mister,
+generic usb mass storage cd drive (user's unit: "B0260" slim usb drive).
+
+upstream will never merge this (their FAQ explicitly rules out usb cd
+drives), so this is a permanent fork. keep the diff surface small and
+rebasable: one new backend directory, one field in cd.h, small guarded
+branches in per-core read functions, one new fifo command.
+
+## 2. verified findings (do not re-derive, these were checked against source)
+
+1. **no fpga work.** cores never touch storage. main (the arm/linux
+   binary) answers all cd sector requests over spi into ddr3. rbf files
+   stay stock. the entire project is linux userspace.
+2. **no kernel work for the core path.** the stock mister kernel
+   defconfig (MiSTer-devel/Linux-Kernel_MiSTer,
+   arch/arm/configs/MiSTer_defconfig) has CONFIG_CDROM=y,
+   CONFIG_BLK_DEV_SR=y, CONFIG_USB_STORAGE=y. the drive enumerates as
+   /dev/sr0 on stock firmware. SG_IO works on /dev/sr0 without
+   CHR_DEV_SG. possible exception: iso9660 fs mount for neogeo cd
+   (verify CONFIG_ISO9660_FS, likely off; only matters for that core).
+3. **the request path** (identical shape in all cd cores): a poll
+   function on a 10-13ms timer sends UIO_CD_GET (0x34) over spi, reads
+   the pending cdd command, runs a cdd state machine
+   (SetCommand/CommandExec/Update), and pushes sectors to the fpga via
+   a SendData callback (ddr3 write). files:
+   - megacd: support/megacd/megacd.cpp (mcd_poll), megacdd.cpp (cdd_t)
+   - psx: support/psx/psx.cpp (psx_read_cd is the whole read path)
+   - saturn: support/saturn/saturncdd.cpp
+   - pcecd: support/pcecd/pcecdd.cpp (+ seektime.cpp, simulation only)
+   - neogeo: support/neogeo/neogeocd.cpp
+   - ao486: ide_cdrom.cpp
+4. **every read site is a two-way branch** on `toc.chd_f` (chd backend,
+   shared support/chd/mister_chd.cpp) vs fileTYPE reads (cue/bin). the
+   physical drive is a third backend with the same shape. cores check
+   `toc.phys` first.
+5. **audio byteswap trap:** chd stores cdda big-endian and cores
+   byteswap after chd reads. the drive returns little-endian like bin
+   files. phys branches must mirror the FILE branch, never the chd
+   branch.
+6. **mount dispatch exists:** user_io.cpp (~line 967) already
+   dispatches mcd_set_image / pcecd_set_image / x86_set_image etc by
+   core type when restoring the `<core>.sN` boot config. reuse this
+   dispatch for the new fifo command.
+7. **cmd fifo:** input.cpp (~line 6237) handles /dev/MiSTer_cmd with
+   load_core, screenshot, volume. no mount command exists. add
+   `mount_phys <idx>`.
+8. **timing headroom:** cores model their own seek latency before
+   expecting data (megacd cdd latency ~10 frames, ~160ms). that models
+   most of a physical cold seek, provided prefetch gets the seek hint
+   at command time, not at first read.
+9. **prior art:** misterfpga.org/viewtopic.php?t=10235, a dev got
+   megacd running from physical disc with exactly this approach
+   (linux answers UIO_CD_GET from the real drive), planning psx,
+   saturn, neogeo next. also the SuperStation One SuperDock ships
+   physical disc boot for psx + megacd + saturn on a mister-derived
+   stack; Main_MiSTer is gpl so hunt Retro-Remake / Takiiiiiiii github
+   orgs for source before writing anything they already wrote.
+
+## 3. architecture
+
+```
+                 +--------------------------------------+
+   usb cd drive  |  Main_MiSTer fork (arm linux)        |   fpga (stock rbf)
+  /dev/sr0 ------+  support/physcd/  <- new backend     |
+   SG_IO 0xBE    |    - toc from CDROMREADTOC* ioctls   |
+   raw 2352(+96) |    - prefetch thread + sector cache  +-- spi UIO_CD_GET/SET
+                 |  per-core cdd state machines         |   sectors via ddr3
+                 |    (unmodified logic, new branch)    |
+                 |  input.cpp: mount_phys fifo cmd      |
+                 +--------------------------------------+
+                          ^
+   physcdd daemon --------+   (disc insert -> identify -> load_core -> mount_phys)
+```
+
+sentinel path convention: `set_image` functions receive the string
+`*PHYSCD*` instead of a file path to mean "mount the physical drive".
+
+## 4. environment and build
+
+- repo: cloned to `Main_MiSTer/`, branch `physcd` (upstream master
+  7317947 + our commit). toolchain arm-none-linux-gnueabihf gcc 10.2.
+- backup remote: ssh://git@192.168.68.65:22222/shane/mister-disc.git
+  (home gitea, key via ~/.ssh/config). branch `main` = this project
+  root; branch `physcd` = the Main_MiSTer fork with full upstream
+  history. two unrelated histories in one repo, on purpose.
+- windows build: `.\tools\build.ps1` (docker image `mister-armcc`,
+  object cache in volume `mister-objcache`, binary lands in
+  `Main_MiSTer\bin\MiSTer`). tools: `arm-none-linux-gnueabihf-gcc -O2
+  -static` inside the same image.
+- integration was: `support/physcd/` (picked up automatically by the
+  Makefile `$(wildcard ./support/*/*.cpp)` - no Makefile edit), plus
+  `int phys;` in cd.h toc_t after `int sectorSize;`. DONE.
+- deploy loop: scp the built MiSTer binary to /media/fat/ on the
+  device, `sync`, reboot or `killall MiSTer` (it restarts). logs:
+  main prints to serial/console, or run MiSTer from ssh in the
+  foreground to see printf output. keep a known-good binary as
+  /media/fat/MiSTer.bak.
+
+## 5. phases and acceptance criteria
+
+### phase 1: hardware validation (blocking, THE remaining prerequisite)
+run the rebuilt `physcd_probe` (now also prints a flags matrix +
+CDROMREADRAW fallback check) on the mister with the b0260 and a
+handful of real discs (at minimum: one mega cd, one psx, one mixed-mode
+disc with audio tracks). record for each:
+- toc correctness vs known disc layout
+- disc type fingerprint correct
+- sequential raw KB/s (need >= 172 sustained; expect far more)
+- worst-case seek+read ms
+- raw subchannel supported yes/no
+- flags matrix: data 0xF8, audio 0xF8 vs 0x10, CDROMREADRAW
+
+acceptance: fingerprints correct, sequential comfortably above 172,
+worst seek under ~400ms. if READ CD with flags 0xF8 fails on this
+drive, adjust the flags byte strategy in the backend (0x10 for data,
+0xF8 for audio) before proceeding.
+
+### phase 2: backend hardening [code done, on-device test pending]
+- wire mister_physcd.cpp into the build. DONE
+- flags-per-track-type + burst clamping at track boundaries + cooked
+  fallback + drive speed + thread affinity: DONE preemptively from
+  prior-art findings. tune further from phase 1 results.
+- unit-style test: small test main() that loads the toc and streams
+  sectors 0..5000 + random seeks, run on device, compare a data
+  sector against a known dump of the same disc (bit-exact for the
+  2048 user bytes; sync+header must match lba). TODO on hardware.
+
+acceptance: bit-exact user data vs a known rip, no stalls > 100ms on
+cached reads, prefetch keeps linear streaming at 0 misses.
+
+### phase 3: megacd integration [code done, acceptance pending hardware]
+follow PATCHPOINTS.md megacd section exactly. summary:
+- cdd_t::Load accepts `*PHYSCD*`, calls physcd_open + physcd_load_toc,
+  forces sectorSize 2352
+- ReadData/ReadCDDA/ReadSubcode get `toc.phys` branches mirroring the
+  FILE branch (no byteswap)
+- seek sites call physcd_seek_hint(lba)
+- mcd_set_image handles the sentinel: bios from HomeDir()/boot.rom,
+  fixed save name for v1
+- menu: not needed for v1, mount via fifo
+
+acceptance: a real mega cd game boots from disc and is playable
+including cdda audio tracks, on a core loaded normally from the menu
+then mounted via `echo mount_phys 0 > /dev/MiSTer_cmd`.
+
+### phase 4: mount_phys command [code done]
+- input.cpp fifo handler: `mount_phys <idx>` dispatches by core type
+  like the user_io.cpp boot-config block (is_megacd -> mcd_set_image
+  with sentinel, is_psx -> psx_mount_cd, etc). unsupported core:
+  print and ignore.
+
+acceptance: works for megacd; stubs print for others.
+
+### phase 5: autodetect daemon (physcdd) [code done]
+small c daemon (reuse probe code) started from user-startup:
+- poll CDROM_MEDIA_CHANGED / CDROM_DRIVE_STATUS every 2s
+- on new disc: identify, map to rbf path (config file
+  /media/fat/physcd.ini mapping type -> rbf path, with sane defaults
+  resolving the newest _Console/<name>_*.rbf), then:
+  - `load_core <rbf>` via fifo
+  - wait for /tmp/CORENAME to match (timeout 15s)
+  - `mount_phys 0` via fifo
+- on eject: nothing in v1 (leave core running)
+
+acceptance: insert mega cd disc from the main menu, game boots hands-free.
+
+### phase 6: more cores
+psx (mind the 150-sector pregap bias in its toc convention, see
+PATCHPOINTS.md), then saturn, pcecd, neogeo (may need iso9660, decide
+kernel module vs userspace iso parser), ao486 last.
+
+acceptance per core: one known-good disc boots and plays with audio.
+
+### phase 7: polish
+- scratched-disc watchdog behavior review (backend currently serves
+  zeros after 3 retries so cores don't hang; verify cores tolerate it)
+- disc swap for multi-disc games (eject detection -> cdd open/close
+  status transitions; megacd cdd already has CD_STAT_OPEN)
+- psx libcrypt: if subchannel unsupported, wire the existing .sbi
+  lookup by disc serial
+- osd feedback: Info() popup on disc detect ("physcd: PSX disc
+  detected") is a two-line add in the daemon-adjacent main code
+
+## 6. risks and mitigations
+
+| risk | mitigation |
+|---|---|
+| drive rejects READ CD 0xF8 | per-track-type flags fallback in sg_read_cd |
+| cold seeks exceed modeled latency | seek hint at cdd command time + 10MB prefetch; if still short, add optional "instant seek off" tolerance testing |
+| index >1 audio positions (rare games) | drive toc lacks index marks; accept as known limitation, document |
+| usb power spikes on spin-up | powered hub, document requirement |
+| upstream drift | keep all changes behind toc.phys / sentinel; rebase quarterly |
+| neogeo needs iso9660 | prefer tiny userspace iso9660 reader over kernel module to keep "stock kernel" property |
+
+## 7. explicit non-goals
+
+- dreamcast (gd-rom unreadable on standard drives)
+- ripping/dumping to storage (different project; xsuite territory)
+- upstreaming
+- windows/dos burner features in ao486 (read-only)
+
+## 8. style
+
+match existing Main_MiSTer conventions: tabs, printf logging with the
+existing color escape style, no exceptions/no stl containers in hot
+paths, c-with-classes like the rest of the codebase.

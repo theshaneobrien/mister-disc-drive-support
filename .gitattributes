@@ -1,0 +1,4 @@
+# sources get scp'd to the mister (linux): keep LF everywhere
+* text=auto eol=lf
+physcdd binary
+physcd_probe binary

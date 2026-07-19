@@ -350,6 +350,56 @@ acceptance per core: one known-good disc boots and plays with audio.
 | upstream drift | keep all changes behind toc.phys / sentinel; rebase quarterly |
 | neogeo needs iso9660 | prefer tiny userspace iso9660 reader over kernel module to keep "stock kernel" property |
 
+## 6b. drive compatibility (design position)
+
+any usb optical drive that enumerates as /dev/srN (usb mass storage /
+uas) should work - that is effectively all of them, including dvd and
+bd drives, which read cds faster than we need. per-drive variance is
+exactly three things, each probed or fallback'd at runtime:
+1. READ CD 0xF8 on data tracks - near universal; bridges that hide raw
+   MMC entirely fall back to kernel CDROMREADRAW (slower ceiling,
+   still >1x).
+2. audio-track flags quirk - handled by the 0xF8/0x10 per-type split.
+3. raw subchannel - probed per disc, graceful degrade (only cd+g and
+   psx libcrypt care).
+speed floor is 172 KB/s sustained + <400ms worst seek: any drive from
+this century clears it several times over. `physcd_probe` is the
+30-second qualification card for a new drive (flags matrix section
+reports all three variances). known trouble: apple usb superdrive
+(needs a vendor init command, won't work stock), bus-powered slims
+browning out the de10 usb on spin-up (powered hub), and dvd DATA
+media (different read path, not implemented - cd media only).
+multiple drives: autodetect prefers the one with media, `mount_phys
+<n>` pins /dev/srN.
+
+## 6c. retroachievements coexistence (phase 8 candidate)
+
+the mister RA stack (manyhats-mike/mister-fpga-retroachievements,
+installed via mister companion) = odelot's fork of Main_MiSTer (reads
+core ram over ddram each frame, evaluates rcheevos) + patched rbf per
+system, installed AS /media/fat/MiSTer. that is the same binary slot
+as our fork: you cannot run both, so coexistence means MERGING the two
+main forks (both gpl forks of the same upstream). our diff surface was
+kept deliberately small for exactly this: expected overlap is near
+zero (they touch main-loop/ddram/user_io hooks; we touch megacd cdd
+internals, support/physcd, one fifo command).
+
+plan when wanted:
+1. git remote add odelot's fork, merge into physcd branch, resolve.
+2. rbf side: RA installs symlinks so _Console launcher paths point at
+   _RA_Cores builds - our daemon's newest-rbf scan follows _Console,
+   so with RA active it would load the RA core automatically. RA
+   megacd rbf keeps the MEGACD corename, so is_megacd()/mount_phys
+   work unchanged.
+3. the real work: achievement identification. rcheevos hashes cd games
+   by reading early disc sectors through its cdreader abstraction (not
+   by hashing the whole image file). physical mounts have no file, so
+   odelot's hash path must be pointed at physcd_read_sector when the
+   filename is the physcd sentinel - the needed sectors are already in
+   our cache. megacd hashing reads the header region of the data
+   track; feasible. until that's wired, physical boots on a merged
+   binary would play fine but start no RA session.
+
 ## 7. explicit non-goals
 
 - dreamcast (gd-rom unreadable on standard drives)

@@ -30,10 +30,24 @@
 // ---------------------------------------------------------------- state
 
 #define CACHE_SECTORS 4096            /* 4096 * 2448B ~= 9.5MB of ram   */
+#define NWIN 2                        /* one window per stream          */
+#define WIN_SECTORS (CACHE_SECTORS / NWIN)
 #define SLOT_SIZE (PHYSCD_RAW + PHYSCD_SUB)
-#define READAHEAD 64                  /* sectors ahead of cursor        */
+#define READAHEAD 96                  /* sectors ahead, per window      */
 #define BURST 16                      /* sectors per drive transaction  */
+#define STATS_MS 5000
 
+/*
+ * mixed-mode discs read two streams at once: the core pulls animation
+ * or game data from a data track while cdda plays from an audio track
+ * thousands of sectors away (sonic cd's intro is the canonical case).
+ * a single prefetch cursor ping-pongs between them and never gets
+ * ahead of either, and a cache mapped `lba % CACHE_SECTORS` lets the
+ * two streams evict each other wherever they happen to be congruent.
+ * so the cache is split into one window per track type - window 0 for
+ * data, window 1 for cdda - each with its own cursor and its own slice
+ * of slots. the two streams can no longer collide or fight.
+ */
 typedef struct {
 	int lba;                      /* -1 = empty                     */
 	int has_sub;
@@ -54,19 +68,40 @@ static struct {
 	phys_trk_t trk[100];
 	int ntrk;
 	slot_t *cache;
-	volatile int cursor;          /* prefetch position              */
+	volatile int cursor[NWIN];    /* prefetch position, per window  */
+	volatile int wactive[NWIN];
 	volatile int running;
 	pthread_t thread;
-	pthread_mutex_t lock;
-} pcd = { -1, 0, -1, -1, {}, 0, NULL, 0, 0, 0, PTHREAD_MUTEX_INITIALIZER };
-
-static inline slot_t *slot_for(int lba) { return &pcd.cache[lba % CACHE_SECTORS]; }
+	pthread_mutex_t lock;         /* guards cache slots             */
+	pthread_mutex_t io;           /* one drive transaction at a time */
+	uint32_t st_hit, st_miss;     /* telemetry, see stats_report()  */
+	double st_worst_ms;
+} pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0,
+	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, 0, 0, 0.0 };
 
 static int track_of(int lba)
 {
 	for (int i = 0; i < pcd.ntrk; i++)
 		if (lba < pcd.trk[i].end) return i;
 	return pcd.ntrk ? pcd.ntrk - 1 : -1;
+}
+
+static inline int win_of(int lba)
+{
+	int t = track_of(lba);
+	return (t >= 0 && pcd.trk[t].audio) ? 1 : 0;
+}
+
+static inline slot_t *slot_for(int lba)
+{
+	return &pcd.cache[win_of(lba) * WIN_SECTORS + (lba % WIN_SECTORS)];
+}
+
+static double now_ms()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
 // ---------------------------------------------------------------- reads
@@ -143,15 +178,23 @@ static int fill_cache(int lba, int count)
 	uint8_t flags = (t >= 0 && pcd.trk[t].audio) ? 0x10 : 0xF8;
 
 	int with_sub = (pcd.sub_ok == 1);
+
+	/* one transaction at a time: a synchronous miss and the prefetch
+	   thread issuing concurrent reads just makes the head seesaw and
+	   both take longer than they would serialized */
+	pthread_mutex_lock(&pcd.io);
 	int r = sg_read_cd(lba, count, flags, with_sub, burst);
+	pthread_mutex_unlock(&pcd.io);
 
 	if (r) {
 		for (int i = 0; i < count; i++) {
 			uint8_t one[SLOT_SIZE];
 			int rr = -1;
+			pthread_mutex_lock(&pcd.io);
 			for (int n = 0; n < 3 && rr; n++)
 				rr = sg_read_cd(lba + i, 1, flags, 0, one);
 			if (rr) rr = cooked_read_raw(lba + i, one);
+			pthread_mutex_unlock(&pcd.io);
 			pthread_mutex_lock(&pcd.lock);
 			slot_t *s = slot_for(lba + i);
 			if (!rr) {
@@ -182,26 +225,57 @@ static int fill_cache(int lba, int count)
 	return 0;
 }
 
+/* dump counters so a stutter can be pinned on the cache instead of
+   guessed at. cleared each interval; only written while streaming. */
+static void stats_report()
+{
+	FILE *f = fopen("/tmp/physcd_stats.log", "w");
+	if (f) {
+		fprintf(f, "hit %u miss %u  hitrate %.1f%%  worst miss %.0f ms\n",
+			pcd.st_hit, pcd.st_miss,
+			(pcd.st_hit + pcd.st_miss) ? 100.0 * pcd.st_hit / (pcd.st_hit + pcd.st_miss) : 0.0,
+			pcd.st_worst_ms);
+		fprintf(f, "data  window: active %d cursor %d\n", pcd.wactive[0], pcd.cursor[0]);
+		fprintf(f, "cdda  window: active %d cursor %d\n", pcd.wactive[1], pcd.cursor[1]);
+		fclose(f);
+	}
+	pcd.st_hit = pcd.st_miss = 0;
+	pcd.st_worst_ms = 0.0;
+}
+
 static void *prefetch_thread(void *arg)
 {
 	(void)arg;
-	int pos = 0;
-	while (pcd.running) {
-		int cur = pcd.cursor;
-		if (cur != pos) pos = cur;         /* seek hint moved us   */
+	int rr = 0;                                /* round-robin start   */
+	double last_stats = now_ms();
 
-		/* find first uncached sector in the readahead window     */
+	while (pcd.running) {
 		int target = -1;
+
+		/* serve the neediest active window, alternating which one
+		   gets looked at first so neither stream starves */
 		pthread_mutex_lock(&pcd.lock);
-		for (int i = 0; i < READAHEAD; i++) {
-			int lba = pos + i;
-			if (lba >= pcd.leadout) break;
-			if (slot_for(lba)->lba != lba) { target = lba; break; }
+		for (int n = 0; n < NWIN && target < 0; n++) {
+			int w = (rr + n) % NWIN;
+			if (!pcd.wactive[w]) continue;
+			int pos = pcd.cursor[w];
+			for (int i = 0; i < READAHEAD; i++) {
+				int lba = pos + i;
+				if (lba >= pcd.leadout) break;
+				if (win_of(lba) != w) break;   /* left the stream */
+				if (slot_for(lba)->lba != lba) { target = lba; break; }
+			}
 		}
 		pthread_mutex_unlock(&pcd.lock);
+		rr = (rr + 1) % NWIN;
+
+		if (now_ms() - last_stats >= STATS_MS) {
+			if (pcd.st_hit || pcd.st_miss) stats_report();
+			last_stats = now_ms();
+		}
 
 		if (target < 0) {
-			/* window full (or no toc yet): check again shortly */
+			/* both windows full (or no toc yet): check again soon */
 			struct timespec ts = { 0, 20 * 1000 * 1000 };
 			nanosleep(&ts, NULL);
 			continue;
@@ -232,6 +306,9 @@ int physcd_open(const char *dev)
 	pcd.leadout = 0;
 	pcd.ntrk = 0;
 	pcd.sub_ok = -1;
+	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; }
+	pcd.st_hit = pcd.st_miss = 0;
+	pcd.st_worst_ms = 0.0;
 	pcd.running = 1;
 	pthread_create(&pcd.thread, NULL, prefetch_thread, NULL);
 
@@ -340,7 +417,15 @@ int physcd_load_toc(toc_t *toc)
 	pcd.sub_ok = -1;
 	probe_subchannel(toc->tracks[0].start + 16);
 
-	pcd.cursor = toc->tracks[0].start;
+	/* prime the data window at track 1; the cdda window activates on
+	   its first read so we don't spin the head over audio nobody
+	   asked for yet */
+	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; }
+	pcd.cursor[0] = toc->tracks[0].start;
+	pcd.wactive[0] = 1;
+	pcd.st_hit = pcd.st_miss = 0;
+	pcd.st_worst_ms = 0.0;
+
 	pcd.leadout = lead.cdte_addr.lba;         /* unblocks prefetch    */
 
 	printf("\x1b[32mphyscd: toc loaded, %d tracks, leadout %d, subchannel %s\n\x1b[0m",
@@ -351,14 +436,20 @@ int physcd_load_toc(toc_t *toc)
 
 void physcd_seek_hint(int lba)
 {
-	pcd.cursor = lba;
+	if (lba < 0 || !pcd.ntrk) return;
+
+	/* retarget only the stream that actually moved */
+	int w = win_of(lba);
+	pcd.cursor[w] = lba;
+	pcd.wactive[w] = 1;
 }
 
 int physcd_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
 {
 	if (pcd.fd < 0 || lba < 0 || lba >= pcd.leadout) return -1;
 
-	pcd.cursor = lba;                         /* keep prefetch ahead  */
+	int w = win_of(lba);
+	pcd.wactive[w] = 1;
 
 	pthread_mutex_lock(&pcd.lock);
 	slot_t *s = slot_for(lba);
@@ -368,9 +459,16 @@ int physcd_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
 		if (sub96) memcpy(sub96, s->data + PHYSCD_RAW, PHYSCD_SUB);
 	}
 	pthread_mutex_unlock(&pcd.lock);
-	if (hit) return 0;
+
+	if (hit) {
+		/* advance this stream's prefetch, leave the other alone */
+		if (lba >= pcd.cursor[w]) pcd.cursor[w] = lba + 1;
+		pcd.st_hit++;
+		return 0;
+	}
 
 	/* cache miss: synchronous burst fill, then serve               */
+	double t0 = now_ms();
 	if (fill_cache(lba, BURST)) return -1;
 
 	pthread_mutex_lock(&pcd.lock);
@@ -381,6 +479,12 @@ int physcd_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
 		if (sub96) memcpy(sub96, s->data + PHYSCD_RAW, PHYSCD_SUB);
 	}
 	pthread_mutex_unlock(&pcd.lock);
+
+	pcd.cursor[w] = lba + 1;
+	pcd.st_miss++;
+	double d = now_ms() - t0;
+	if (d > pcd.st_worst_ms) pcd.st_worst_ms = d;
+
 	return hit ? 0 : -1;
 }
 

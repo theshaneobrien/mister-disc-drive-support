@@ -127,6 +127,13 @@ void mcd_set_image(int num, const char *filename)
 	cdd.status = CD_STAT_OPEN;
 
 	int same_game = *filename && *last_dir && !strncmp(last_dir, filename, strlen(last_dir));
+
+	/* the phys sentinel is one fixed string, so a remount would always
+	   look like the same game and skip the bios load + reset - including
+	   after a failed mount, which would then never recover. a physical
+	   mount is always a fresh disc: re-init every time. */
+	if (!strcmp(filename, PHYSCD_SENTINEL)) same_game = 0;
+
 	strcpy(last_dir, filename);
 	char *p = strrchr(last_dir, '/');
 	if (p) *p = 0;

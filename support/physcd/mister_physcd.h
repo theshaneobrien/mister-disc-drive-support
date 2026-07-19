@@ -30,7 +30,17 @@
 #define PHYSCD_RAW  2352
 #define PHYSCD_SUB  96
 
-// open the drive and spin up the cache thread. 0 on success.
+// pick the drive for the next physcd_open(). pass a path ("/dev/sr1")
+// to pin one, or NULL/"" to autodetect. usb enumeration order is not
+// stable across reboots, so autodetect is the default.
+void physcd_set_device(const char *dev);
+
+// the device actually in use, "" when closed (for logging/osd)
+const char *physcd_device_name();
+
+// open the drive and spin up the cache thread. dev NULL honors
+// physcd_set_device() and otherwise scans /dev/sr0../dev/sr7,
+// preferring a drive with media. 0 on success.
 int physcd_open(const char *dev);
 
 // true if a readable disc is present

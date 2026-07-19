@@ -6267,14 +6267,18 @@ int input_test(int getchar)
 					}
 					else if (!strncmp(cmd, "mount_phys", 10))
 					{
-						// mount the physical cd drive into the running cd core
+						// mount_phys [n] - mount the physical cd drive into the
+						// running cd core. n pins /dev/srN; bare autodetects.
 						const char *p = cmd + 10;
 						while (*p == ' ' || *p == '\t') p++;
-						int idx = (*p >= '0' && *p <= '9') ? *p - '0' : 0;
+
+						char dev[64] = "";
+						if (*p >= '0' && *p <= '9') snprintf(dev, sizeof(dev), "/dev/sr%c", *p);
+						physcd_set_device(dev);
 
 						if (is_megacd())
 						{
-							mcd_set_image(idx, PHYSCD_SENTINEL);
+							mcd_set_image(0, PHYSCD_SENTINEL);
 						}
 						else if (is_psx() || is_saturn() || is_pce() || is_neogeo_cd() || is_x86())
 						{

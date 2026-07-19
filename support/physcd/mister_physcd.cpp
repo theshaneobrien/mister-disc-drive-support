@@ -287,12 +287,68 @@ static void *prefetch_thread(void *arg)
 
 // ---------------------------------------------------------------- api
 
+static char pref_dev[64] = "";       /* "" = autodetect */
+static char cur_dev[64] = "";        /* what we actually opened */
+
+void physcd_set_device(const char *dev)
+{
+	if (dev && *dev) snprintf(pref_dev, sizeof(pref_dev), "%s", dev);
+	else pref_dev[0] = 0;
+}
+
+const char *physcd_device_name()
+{
+	return cur_dev;
+}
+
+/*
+ * usb enumeration order is not stable: the same drive comes up as
+ * /dev/sr0 one boot and /dev/sr1 the next (a card reader or a second
+ * usb storage device claiming the earlier minor is enough to shift
+ * it). so never assume a name - scan, and prefer a drive with media.
+ */
+static int open_drive(char *out, int outsz)
+{
+	char path[64];
+	int spare = -1;
+
+	if (pref_dev[0]) {
+		int fd = open(pref_dev, O_RDONLY | O_NONBLOCK);
+		if (fd >= 0) { snprintf(out, outsz, "%s", pref_dev); return fd; }
+		printf("physcd: %s not available (%s), scanning\n", pref_dev, strerror(errno));
+	}
+
+	for (int i = 0; i < 8; i++) {
+		snprintf(path, sizeof(path), "/dev/sr%d", i);
+		int fd = open(path, O_RDONLY | O_NONBLOCK);
+		if (fd < 0) continue;
+
+		if (ioctl(fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) == CDS_DISC_OK) {
+			snprintf(out, outsz, "%s", path);
+			if (spare >= 0) close(spare);
+			return fd;
+		}
+		/* opens but empty: remember it in case nothing has a disc */
+		if (spare < 0) { spare = fd; snprintf(out, outsz, "%s", path); }
+		else close(fd);
+	}
+	return spare;
+}
+
 int physcd_open(const char *dev)
 {
-	if (pcd.fd >= 0) return 0;
-	pcd.fd = open(dev ? dev : PHYSCD_DEV_DEFAULT, O_RDONLY | O_NONBLOCK);
+	if (dev && *dev) physcd_set_device(dev);
+
+	if (pcd.fd >= 0) {
+		/* already open on the drive we want? */
+		if (!pref_dev[0] || !strcmp(pref_dev, cur_dev)) return 0;
+		physcd_close();
+	}
+
+	pcd.fd = open_drive(cur_dev, sizeof(cur_dev));
 	if (pcd.fd < 0) {
-		printf("physcd: cannot open %s: %s\n", dev ? dev : PHYSCD_DEV_DEFAULT, strerror(errno));
+		cur_dev[0] = 0;
+		printf("physcd: no cd-rom drive found (looked at /dev/sr0../dev/sr7)\n");
 		return -1;
 	}
 
@@ -320,7 +376,7 @@ int physcd_open(const char *dev)
 	CPU_SET(1, &set);
 	pthread_setaffinity_np(pcd.thread, sizeof(set), &set);
 
-	printf("\x1b[32mphyscd: opened %s\n\x1b[0m", dev ? dev : PHYSCD_DEV_DEFAULT);
+	printf("\x1b[32mphyscd: opened %s\n\x1b[0m", cur_dev);
 	return 0;
 }
 
@@ -565,4 +621,5 @@ void physcd_close()
 	pcd.leadout = 0;
 	pcd.ntrk = 0;
 	pcd.first_data_lba = -1;
+	cur_dev[0] = 0;
 }

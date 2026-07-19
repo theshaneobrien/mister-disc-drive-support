@@ -51,6 +51,7 @@
 typedef struct {
 	int lba;                      /* -1 = empty                     */
 	int has_sub;
+	int bad;                      /* zero-filled, sector unreadable */
 	uint8_t data[SLOT_SIZE];
 } slot_t;
 
@@ -75,9 +76,13 @@ static struct {
 	pthread_mutex_t lock;         /* guards cache slots             */
 	pthread_mutex_t io;           /* one drive transaction at a time */
 	uint32_t st_hit, st_miss;     /* telemetry, see stats_report()  */
-	double st_worst_ms;
+	uint32_t st_bad;              /* sectors served as zeros        */
+	uint32_t st_bad_logged;
+	double st_worst_ms;           /* worst consumer-visible miss    */
+	double st_worst_io_ms;        /* worst drive transaction        */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0,
-	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, 0, 0, 0.0 };
+	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
+	  0, 0, 0, 0, 0.0, 0.0 };
 
 static int track_of(int lba)
 {
@@ -182,6 +187,7 @@ static int fill_cache(int lba, int count)
 	/* one transaction at a time: a synchronous miss and the prefetch
 	   thread issuing concurrent reads just makes the head seesaw and
 	   both take longer than they would serialized */
+	double io0 = now_ms();
 	pthread_mutex_lock(&pcd.io);
 	int r = sg_read_cd(lba, count, flags, with_sub, burst);
 	pthread_mutex_unlock(&pcd.io);
@@ -199,18 +205,37 @@ static int fill_cache(int lba, int count)
 			slot_t *s = slot_for(lba + i);
 			if (!rr) {
 				memcpy(s->data, one, PHYSCD_RAW);
+				s->bad = 0;
 			} else {
-				/* unreadable: serve zeros, don't stall core */
+				/* unreadable: serve zeros so the core never hangs.
+				   this is silent corruption by design, so COUNT it -
+				   a zero-filled slot is still a cache hit later and
+				   would otherwise hide a rotting disc behind a 100%
+				   hit rate. */
 				memset(s->data, 0, PHYSCD_RAW);
-				printf("physcd: unreadable sector lba=%d\n", lba + i);
+				s->bad = 1;
+				pcd.st_bad++;
+				/* never log per sector in the hot path: with output
+				   on /dev/ttyS0 each line blocks on serial for ms and
+				   a bad region would stall the core by logging. */
+				if (pcd.st_bad_logged < 8) {
+					pcd.st_bad_logged++;
+					printf("physcd: unreadable sector lba=%d%s\n", lba + i,
+						pcd.st_bad_logged == 8 ? " (further ones counted silently)" : "");
+				}
 			}
 			memset(s->data + PHYSCD_RAW, 0, PHYSCD_SUB);
 			s->has_sub = 0;
 			s->lba = lba + i;
 			pthread_mutex_unlock(&pcd.lock);
 		}
+		double d = now_ms() - io0;
+		if (d > pcd.st_worst_io_ms) pcd.st_worst_io_ms = d;
 		return 0;
 	}
+
+	double d = now_ms() - io0;
+	if (d > pcd.st_worst_io_ms) pcd.st_worst_io_ms = d;
 
 	int sector_len = PHYSCD_RAW + (with_sub ? PHYSCD_SUB : 0);
 	pthread_mutex_lock(&pcd.lock);
@@ -235,12 +260,20 @@ static void stats_report()
 			pcd.st_hit, pcd.st_miss,
 			(pcd.st_hit + pcd.st_miss) ? 100.0 * pcd.st_hit / (pcd.st_hit + pcd.st_miss) : 0.0,
 			pcd.st_worst_ms);
+		/* BAD is the number that matters on an aging disc: those
+		   sectors were served to the core as zeros and counted as
+		   hits. nonzero here means the disc, not the cache. */
+		fprintf(f, "BAD %u sectors served as zeros  worst drive io %.0f ms\n",
+			pcd.st_bad, pcd.st_worst_io_ms);
 		fprintf(f, "data  window: active %d cursor %d\n", pcd.wactive[0], pcd.cursor[0]);
 		fprintf(f, "cdda  window: active %d cursor %d\n", pcd.wactive[1], pcd.cursor[1]);
 		fclose(f);
 	}
 	pcd.st_hit = pcd.st_miss = 0;
 	pcd.st_worst_ms = 0.0;
+	pcd.st_worst_io_ms = 0.0;
+	/* st_bad is cumulative for the mount - a running total is what
+	   you want when hunting an intermittent read problem */
 }
 
 static void *prefetch_thread(void *arg)
@@ -479,8 +512,8 @@ int physcd_load_toc(toc_t *toc)
 	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; }
 	pcd.cursor[0] = toc->tracks[0].start;
 	pcd.wactive[0] = 1;
-	pcd.st_hit = pcd.st_miss = 0;
-	pcd.st_worst_ms = 0.0;
+	pcd.st_hit = pcd.st_miss = pcd.st_bad = pcd.st_bad_logged = 0;
+	pcd.st_worst_ms = pcd.st_worst_io_ms = 0.0;
 
 	pcd.leadout = lead.cdte_addr.lba;         /* unblocks prefetch    */
 

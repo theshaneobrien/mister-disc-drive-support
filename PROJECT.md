@@ -161,6 +161,38 @@ worst seek under ~400ms. if READ CD with flags 0xF8 fails on this
 drive, adjust the flags byte strategy in the backend (0x10 for data,
 0xF8 for audio) before proceeding.
 
+#### results: b0260, 2026-07-19, mega cd disc (1 data + 34 audio, 556MB)
+
+| metric | measured | acceptance | verdict |
+|---|---|---|---|
+| toc | 35 tracks, data lba 0, leadout 248060 | plausible layout | pass |
+| fingerprint | "mega cd" | correct | pass |
+| sequential raw | 740.9 KB/s (~4.3x, 322 sectors/s) | >= 172 | pass |
+| seek+read | avg 194ms, worst 248ms | worst < 400ms | pass |
+| raw subchannel | SUPPORTED | either | pass (bonus) |
+
+subchannel support is better than assumed: the backend's probe will
+enable it, ReadSubcode's phys branch delivers real subcode instead of
+returning -1, and psx libcrypt should not need .sbi files later.
+cost is 2448 vs 2352 bytes per sector, ~4% of a 740 KB/s budget.
+
+seek margin (why 248ms worst is fine): SeekToLBA sets
+`latency = 11 + (distance * 120) / 270000` frames for play, and
+latency decrements once per mcd_poll (~13.5ms). the probe's ~40000
+sector jump models 11+17 = 28 frames ~= 378ms against 248ms measured,
+so ~130ms of slack. longer seeks model proportionally more (a
+full-disc seek models ~1.6s). the thin case is a SHORT data seek,
+where the distance term rounds to 0 and non-play seeks start from
+latency 0 - that one relies entirely on prefetch, so watch for audio
+hiccups at track transitions during the phase 3 game test.
+
+STILL MISSING: the flags matrix. the run above used a stale probe
+binary (pre-2026-07-19-20:23) that predates the flags-matrix block, so
+`data 0xF8 / audio 0xF8 / audio 0x10 / CDROMREADRAW` are unverified.
+copy the current `physcd_probe` to the mister and re-run on this same
+disc - with 34 audio tracks it is the ideal disc for the audio-flags
+question, which is risk #1 for this drive.
+
 ### phase 2: backend hardening [code done, on-device test pending]
 - wire mister_physcd.cpp into the build. DONE
 - flags-per-track-type + burst clamping at track boundaries + cooked

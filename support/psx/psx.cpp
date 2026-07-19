@@ -110,7 +110,12 @@ static void unload_chd(toc_t *table)
 	{
 		chd_close(table->chd_f);
 	}
+	/* NULL after free: upstream got away without it because load_chd/
+	   load_cue always reallocate straight after, but load_phys does
+	   not - and a second unload_chd (e.g. the failure path of the
+	   same mount) would double-free and abort the process. */
 	if (chd_hunkbuf) free(chd_hunkbuf);
+	chd_hunkbuf = NULL;
 	memset(table, 0, sizeof(toc_t));
 	chd_hunknum = -1;
 

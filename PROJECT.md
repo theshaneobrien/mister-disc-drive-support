@@ -221,6 +221,31 @@ acceptance: a real mega cd game boots from disc and is playable
 including cdda audio tracks, on a core loaded normally from the menu
 then mounted via `echo mount_phys 0 > /dev/MiSTer_cmd`.
 
+#### result 2026-07-19: PASS. sonic cd boots and plays well from disc.
+
+no byteswap decision confirmed correct (audio is music, not static).
+remaining defect: the opening fmv stutters intermittently - beyond its
+inherently low framerate. diagnosed as a mixed-mode cache problem, not
+a bandwidth one (740 KB/s vs the ~344 KB/s that intro needs for both
+streams):
+  1. one shared prefetch cursor, slammed by every read, so the data
+     stream and the cdda stream yanked it back and forth and the
+     prefetch thread never got ahead of either.
+  2. cache slots mapped `lba % 4096`, so streams congruent mod 4096
+     evicted each other. sonic cd's audio starts at lba 55248 =
+     slot 2000, exactly where the animation stream sweeps through.
+fix in commit fc6b7ab: one cache window per track type (data / cdda),
+each with its own slot slice and cursor; reads and seek hints retarget
+only the stream that moved; drive transactions serialized behind an io
+mutex so a synchronous miss and the prefetch thread stop making the
+head seesaw. UNVERIFIED ON HARDWARE - confirm via the new
+/tmp/physcd_stats.log (want hit rate >99% and worst miss well under
+the ~13.5ms per-sector budget during the intro).
+
+known narrow race, deferred to phase 7 disc swap: a fill_cache in
+flight during physcd_load_toc can land old-disc sectors in freshly
+invalidated slots. harmless in v1 (no swap support).
+
 ### phase 4: mount_phys command [code done]
 - input.cpp fifo handler: `mount_phys <idx>` dispatches by core type
   like the user_io.cpp boot-config block (is_megacd -> mcd_set_image

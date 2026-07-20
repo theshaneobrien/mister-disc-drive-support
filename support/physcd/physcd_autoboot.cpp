@@ -232,12 +232,16 @@ int physcd_menu_row(char *out, int outsz)
 		char rbf[1024];
 		if (core && find_core_rbf(core, rbf, sizeof(rbf)))
 		{
-			/* a real title only if there is a non-blank one - a
-			   whitespace-only label must not render "Play:  - Mega CD" */
+			/* a real title only if there is a non-blank one that is not
+			   just the console name - a whitespace-only label must not
+			   render "Play:  - Mega CD", and a generic "SATURN" label
+			   must not render "Play: Saturn - Saturn" */
 			const char *title = label;
 			while (*title == ' ') title++;
-			if (*title) snprintf(out, outsz, "Play: %s - %s", title, physcd_console_name(t));
-			else        snprintf(out, outsz, "Play %s Disc", physcd_console_name(t));
+			int generic = !strcasecmp(title, physcd_console_name(t))
+				|| !strcasecmp(title, physcd_disc_name(t));
+			if (*title && !generic) snprintf(out, outsz, "Play: %s - %s", title, physcd_console_name(t));
+			else                    snprintf(out, outsz, "Play %s Disc", physcd_console_name(t));
 			return 1;
 		}
 	}

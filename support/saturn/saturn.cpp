@@ -163,6 +163,16 @@ int saturn_set_image(int num, const char *filename)
 	int reset_after_insert_disc = !user_io_status_get("[4]");
 	int phys = !strcmp(filename, PHYSCD_SENTINEL);
 	int mounted = 0;
+	physcd_region_t disc_region = PHYSCD_REGION_UNKNOWN;
+
+	/* the bios is chosen below, before satcdd.Load opens the drive, so
+	   open it early here to read the disc's region. a PAL disc on an
+	   NTSC bios region locks (Die Hard Trilogy), so this matters. */
+	if (phys && !physcd_open(NULL))
+	{
+		disc_region = physcd_saturn_region();
+		if (!physcd_disc_present()) physcd_close();
+	}
 
 	satcdd.Unload();
 	satcdd.Reset();
@@ -171,8 +181,10 @@ int saturn_set_image(int num, const char *filename)
 	/* the phys sentinel is one fixed string, so a remount always looks
 	   like the same game and would skip the bios load + reset (and a
 	   failed mount could never recover). a physical mount is a fresh
-	   disc: re-init every time. */
-	if (phys) same_game = 0;
+	   disc: re-init every time, regardless of the reset-on-insert
+	   toggle [4] (which would otherwise leave a physical mount with no
+	   bios). */
+	if (phys) { same_game = 0; reset_after_insert_disc = 1; }
 	strcpy(last_dir, filename);
 	char *p = strrchr(last_dir, '/');
 	if (p) *p = 0;
@@ -186,7 +198,26 @@ int saturn_set_image(int num, const char *filename)
 
 		// load CD BIOS
 		int bios_loaded = 0;
-		if (!phys) // per-game bios lives next to the image, no folder for a physical disc
+		if (phys)
+		{
+			// no game folder on a physical disc: match the bios to the
+			// disc region (boot_EU/US/JP.rom, or bios_XX.rom), else boot.rom
+			const char *rn = physcd_region_name(disc_region);
+			if (*rn)
+			{
+				sprintf(buf, "%s/boot_%s.rom", HomeDir(), rn);
+				bios_loaded = user_io_file_tx(buf);
+				if (!bios_loaded)
+				{
+					sprintf(buf, "%s/bios_%s.rom", HomeDir(), rn);
+					bios_loaded = user_io_file_tx(buf);
+				}
+			}
+			printf("\x1b[32mSaturn: physical disc region %s%s\n\x1b[0m",
+				*rn ? rn : "unknown",
+				bios_loaded ? ", loaded matching BIOS" : ", falling back to boot.rom");
+		}
+		else // per-game bios lives next to the image
 		{
 			bios_loaded = saturn_load_rom(filename, "cd_bios.rom", 0)    // from disk folder
 				|| saturn_load_rom(last_dir, "cd_bios.rom", 0);         // from parent folder

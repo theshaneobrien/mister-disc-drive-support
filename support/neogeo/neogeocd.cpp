@@ -112,15 +112,18 @@ void set_poll_timer()
 
 int neocd_set_image(const char *filename)
 {
+	int bios_ok = 0;
+
 	cdd.Unload();
 	cdd.status = CD_STAT_OPEN;
 
 	if (*filename)
 	{
-		// romset_tx wants a mutable buffer; it does not modify the name
+		// romset_tx wants a mutable buffer; it does not modify the name.
+		// it returns 0 when the cd bios is missing.
 		char nm[1024];
 		snprintf(nm, sizeof(nm), "%s", filename);
-		neogeo_romset_tx(nm, 1);
+		bios_ok = neogeo_romset_tx(nm, 1);
 
 		if (cdd.Load(filename) > 0)
 		{
@@ -137,8 +140,9 @@ int neocd_set_image(const char *filename)
 
 	neocd_reset();
 
-	// autoboot needs to know a disc actually mounted
-	return cdd.loaded;
+	// autoboot needs both a mounted disc AND a loaded bios, or it would
+	// report success on a core that boots to a blank screen
+	return bios_ok && cdd.loaded;
 }
 
 void neocd_reset() {

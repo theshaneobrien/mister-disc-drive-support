@@ -12,12 +12,56 @@ files ship alongside this doc:
 - `Main_MiSTer/` (the fork, branch `physcd`, builds clean)
 - `tools/` (windows docker cross-compile: `.\tools\build.ps1`)
 
-## 0. status as of 2026-07-19
+## 0. status
 
-phases 2-5 are CODE-COMPLETE and compiling (commit 1afcd2f on branch
-`physcd`); phase 1 (hardware validation) is now the only blocker and
-needs the physical mister + b0260 + discs. deploy `bin/MiSTer` +
-`physcd_probe` + `physcdd` and follow section 5.
+### 2026-07-20: FIVE CONSOLES WORKING ON HARDWARE
+
+physical disc boot is working and hardware-tested for MegaCD, PSX,
+Saturn, NeoGeo CD and 3DO. autoboot-from-menu and the bottom-of-list
+"Play Disc" row both work. each core went through an adversarial code
+review that caught real bugs (cache corruption, a menu lockout, a
+Makefile-induced black screen, a false-success on missing bios). the
+autoboot daemon idea (physcdd) was retired in favour of doing it inside
+main. README.md is the user-facing summary.
+
+per-console notes:
+- MegaCD: cdda audio + region-matched bios (boot_EU/US/JP.rom). sonic cd.
+- PSX: region auto (sent in disc metadata); game serial fallback for
+  the menu label. x-files, wipeout.
+- Saturn: set the core Region option to Auto (not bios-based). virtua
+  fighter, die hard trilogy.
+- NeoGeo CD: reuses the megacd cdd; unibios = region free. kof95,
+  windjammers, sonic wings 3. missing-bios now reported not silent.
+- 3DO: data only (core has no cdda path). detection via the proprietary
+  0x01+0x5A volume header. japanese discs tested. (the 3do logo showing
+  a few extra times is a core boot quirk, not ours.)
+
+what is left:
+- PC Engine CD (pcecd core, same recipe) - blocked on acquiring a disc.
+- CD-i (cdi core, same chd/toc pattern) - feasible, niche, do if wanted.
+- disc swap for multi-disc games (FF, vib ribbon) - phase 7, scoped.
+- psx real subchannel / libcrypt without .sbi - phase 7.
+- RA coexistence - phase 8 (see 6c).
+- upstreamable fixes to offer main: the Makefile -MT dependency bug and
+  the FileGenerateSavestatePath NULL deref.
+
+OUT OF SCOPE, decided:
+- Dreamcast: gd-rom is unreadable in standard cd/dvd drives. the new
+  mega-alpha dreamcast core does not change that.
+- ao486 (dos/pc): different flow entirely (install to hdd from the disc,
+  then run; the disc is a data source, not a bootable game). more an
+  "attach the drive to the core" job than pop-in-and-play. deferred,
+  possibly folded into a wider "physical drives (incl. floppies)" idea.
+
+the REAL-WORLD limiter remains drive POWER: a weak 5v feed browns out
+the drive on heavy seeks and it drops off the usb bus. software recovers
+(reattach + keep-alive), but a proper powered feed is the fix.
+
+### 2026-07-19: initial bring-up (historical)
+
+phases 2-5 were code-complete and compiling (commit 1afcd2f on branch
+`physcd`); phase 1 (hardware validation) was the blocker. deploy
+`bin/MiSTer` + `physcd_probe` and follow section 5.
 
 prior art update (supersedes section 2 item 9): two public gpl
 implementations exist and were mined for drive quirks -

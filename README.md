@@ -10,13 +10,15 @@ Most of the code here was written with an AI assistant (Claude), with me steerin
 
 ## What works
 
-* MegaCD, PlayStation, Saturn, and NeoGeo CD games boot and play from disc, CD audio tracks included.
+* MegaCD, PlayStation, Saturn, NeoGeo CD, and 3DO games boot and play from disc, CD audio tracks included where the core supports them.
 * The disc is identified automatically, so the right core loads for whatever you put in.
 * Region is handled per core, see the Region section below.
 * Autoboot. Drop a disc in at the menu and it loads the right core and mounts the disc, hands free.
 * Manual mode. A Play row at the bottom of the core list, so you load a disc when you want instead of on insert.
 
-PC Engine CD and swapping discs mid game are not done yet. This does what the list above says and nothing more.
+PC Engine CD and swapping discs mid game are not done yet. CD-i is another CD core that could be added the same way if there is interest. This does what the list above says and nothing more.
+
+Some things are deliberately out of scope. Dreamcast uses GD-ROM, a proprietary high density format that normal CD and DVD drives cannot read, so it is not possible with this hardware. ao486 (DOS/Windows PC) is a different flow, you install a game to the hard drive from the disc rather than booting it, so it is more of an "attach the drive to the core" job than "put a disc in and play" and is left for later.
 
 ## What you need
 

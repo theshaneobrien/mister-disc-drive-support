@@ -25,7 +25,6 @@
  *    to mean "mount the physical drive"
  */
 
-#define PHYSCD_DEV_DEFAULT "/dev/sr0"
 #define PHYSCD_SENTINEL "*PHYSCD*"
 #define PHYSCD_RAW  2352
 #define PHYSCD_SUB  96
@@ -34,9 +33,6 @@
 // to pin one, or NULL/"" to autodetect. usb enumeration order is not
 // stable across reboots, so autodetect is the default.
 void physcd_set_device(const char *dev);
-
-// the device actually in use, "" when closed (for logging/osd)
-const char *physcd_device_name();
 
 // open the drive and spin up the cache thread. dev NULL honors
 // physcd_set_device() and otherwise scans /dev/sr0../dev/sr7,
@@ -55,11 +51,6 @@ int physcd_media_changed();
 // 0 on success.
 int physcd_load_toc(toc_t *toc);
 
-// true if the drive answered a raw P-W subchannel read during the
-// probe in physcd_load_toc. when 0, sub96 out params come back zeroed
-// and cores should take their "no sub file" path instead.
-int physcd_sub_supported();
-
 // read one full raw sector (2352 bytes) into dst, served from cache
 // when possible. if sub96 is non-null also return the raw P-W
 // subchannel for that sector. blocking, with internal retry.
@@ -68,9 +59,9 @@ int physcd_read_sector(int lba, uint8_t *dst, uint8_t *sub96);
 
 // as above, but returns 1 only when sub96 received REAL subchannel
 // data. sectors recovered by the single-sector retry or the cooked
-// fallback carry none, so a per-disc physcd_sub_supported() check is
-// not enough - a caller that treats zeros as valid subcode would feed
-// the core fabricated data. returns 0 on failure or when absent.
+// fallback carry none, so a per-disc capability flag is not enough - a
+// caller that treats zeros as valid subcode would feed the core
+// fabricated data. returns 0 on failure or when absent.
 int physcd_read_sector_sub(int lba, uint8_t *dst, uint8_t *sub96);
 
 // convenience: read only the 2048 user bytes of a mode1/mode2 data

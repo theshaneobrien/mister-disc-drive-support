@@ -420,7 +420,6 @@ static void stats_report()
 }
 
 static int open_drive(char *out, int outsz);   /* defined below */
-extern char cur_dev[];
 
 /*
  * a usb drive can vanish mid-session and come back as a DIFFERENT
@@ -642,11 +641,6 @@ void physcd_set_device(const char *dev)
 	else pref_dev[0] = 0;
 }
 
-const char *physcd_device_name()
-{
-	return cur_dev;
-}
-
 /*
  * usb enumeration order is not stable: the same drive comes up as
  * /dev/sr0 one boot and /dev/sr1 the next (a card reader or a second
@@ -749,11 +743,6 @@ static void probe_subchannel(int lba)
 	if (!sg_read_cd(lba, 1, flags, 1, buf, BG_TIMEOUT_MS)) { pcd.sub_ok = 1; return; }
 	if (!sg_read_cd(lba, 1, flags, 0, buf, BG_TIMEOUT_MS)) { pcd.sub_ok = 0; return; }
 	pcd.sub_ok = -1;                  /* couldn't tell, retry later */
-}
-
-int physcd_sub_supported()
-{
-	return pcd.sub_ok == 1;
 }
 
 int physcd_load_toc(toc_t *toc)

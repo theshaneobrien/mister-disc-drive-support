@@ -37,7 +37,7 @@ Some things are deliberately out of scope. Dreamcast uses GD-ROM, a proprietary 
 A disc and the console BIOS have to agree on region or a game either refuses to boot or plays at the wrong speed. Each core handles this differently, so:
 
 * Saturn: the core has its own Region option. Set it to Auto in the core's OSD menu and it reads the region off the disc. One boot.rom is all you need.
-* PlayStation: handled for you. The region is detected and sent to the core.
+* PlayStation: set the core Region to Auto, same as Saturn. The fork reads the region off the disc and sends it to the core, so on Auto it boots PAL, NTSC-U, and NTSC-J discs with nothing to set. Forcing the core to a fixed region overrides that, which is what makes a PAL disc stutter on a US setting, so leave it on Auto.
 * NeoGeo CD: use a Unibios and it is region free, so nothing to set. Otherwise the core's system type (CD or CDZ) has to match your BIOS.
 * MegaCD: the BIOS is the region. Drop boot_EU.rom, boot_US.rom, and boot_JP.rom into the MegaCD home folder and the matching one loads automatically. A plain boot.rom still works as a catch all. Some MegaCD setups also have an Auto region option in the core, so try that first if you have it.
 

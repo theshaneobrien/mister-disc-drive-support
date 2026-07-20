@@ -12,6 +12,7 @@
  *   ./physcd_probe /dev/sr0
  */
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -195,9 +196,16 @@ static const char *fingerprint(int fd, struct track_info *tracks, int ntracks)
 		if (memcmp(iso + 1, "CD001", 5)) iso = user + 8;
 		if (!memcmp(iso + 1, "CD001", 5)) {
 			if (!memcmp(iso + 8, "PLAYSTATION", 11)) return "psx";
-			/* neogeo cd: iso9660, check for system id or fall through to file check */
 			if (!memcmp(iso + 8, "NGCD", 4)) return "neogeo cd";
 		}
+	}
+
+	/* neogeo cd: IPL.TXT is always in the root, more reliable than the
+	   PVD system id */
+	for (int s = 16; s <= 40; s++) {
+		if (read_cd_raw(fd, first_data_lba + s, 1, buf) != 0) continue;
+		int mode = buf[15] == 2 ? 24 : 16;
+		if (memmem(buf + mode, 2048, "IPL.TXT", 7)) return "neogeo cd";
 	}
 
 	/* pce cd: signature in the boot sector of the data track */

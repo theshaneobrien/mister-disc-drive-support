@@ -18,6 +18,7 @@
 #include "../../bootcore.h"
 #include "../megacd/megacd.h"
 #include "../psx/psx.h"
+#include "../saturn/saturn.h"
 #include "mister_physcd.h"
 #include "physcd_autoboot.h"
 
@@ -65,7 +66,7 @@ static int core_matches(physcd_disc_t t)
    just dumps the user in a bare bios with no disc and no explanation */
 static int mountable(physcd_disc_t t)
 {
-	return t == PHYSCD_DISC_MEGACD || t == PHYSCD_DISC_PSX;
+	return t == PHYSCD_DISC_MEGACD || t == PHYSCD_DISC_PSX || t == PHYSCD_DISC_SATURN;
 }
 
 int physcd_mount_current_core(void)
@@ -76,6 +77,8 @@ int physcd_mount_current_core(void)
 
 	// f_index/s_index as the menu uses for the cd slot
 	if (is_psx()) return psx_mount_cd(1, 1, PHYSCD_SENTINEL);
+
+	if (is_saturn()) return saturn_set_image(0, PHYSCD_SENTINEL);
 
 	printf("physcd: core '%s' has no physical disc support yet\n", user_io_get_core_name());
 	return 0;

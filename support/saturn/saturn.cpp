@@ -10,6 +10,7 @@
 #include "../../menu.h"
 #include "../../cheats.h"
 #include "saturn.h"
+#include "../physcd/mister_physcd.h"
 
 static int need_reset = 0;
 uint32_t saturn_frame_cnt = 0;
@@ -153,18 +154,25 @@ static int saturn_load_rom(const char *basename, const char *name, int sub_index
 	return 0;
 }
 
-void saturn_set_image(int num, const char *filename)
+int saturn_set_image(int num, const char *filename)
 {
 	static char last_dir[1024] = {};
 
 	(void)num;
 
 	int reset_after_insert_disc = !user_io_status_get("[4]");
+	int phys = !strcmp(filename, PHYSCD_SENTINEL);
+	int mounted = 0;
 
 	satcdd.Unload();
 	satcdd.Reset();
 
 	int same_game = *filename && *last_dir && !strncmp(last_dir, filename, strlen(last_dir));
+	/* the phys sentinel is one fixed string, so a remount always looks
+	   like the same game and would skip the bios load + reset (and a
+	   failed mount could never recover). a physical mount is a fresh
+	   disc: re-init every time. */
+	if (phys) same_game = 0;
 	strcpy(last_dir, filename);
 	char *p = strrchr(last_dir, '/');
 	if (p) *p = 0;
@@ -177,15 +185,18 @@ void saturn_set_image(int num, const char *filename)
 		saturn_reset();
 
 		// load CD BIOS
-		if (!saturn_load_rom(filename, "cd_bios.rom", 0)) // from disk folder.
+		int bios_loaded = 0;
+		if (!phys) // per-game bios lives next to the image, no folder for a physical disc
 		{
-			if (!saturn_load_rom(last_dir, "cd_bios.rom", 0)) // from parent folder.
+			bios_loaded = saturn_load_rom(filename, "cd_bios.rom", 0)    // from disk folder
+				|| saturn_load_rom(last_dir, "cd_bios.rom", 0);         // from parent folder
+		}
+		if (!bios_loaded)
+		{
+			sprintf(buf, "%s/boot.rom", HomeDir()); // from home folder
+			if (!user_io_file_tx(buf))
 			{
-				sprintf(buf, "%s/boot.rom", HomeDir()); // from home folder.
-				if (!user_io_file_tx(buf))
-				{
-					Info("CD BIOS not found!", 4000);
-				}
+				Info("CD BIOS not found!", 4000);
 			}
 		}
 	}
@@ -196,12 +207,14 @@ void saturn_set_image(int num, const char *filename)
 	{
 		if (satcdd.Load(filename) > 0)
 		{
+			mounted = 1;
 			satcdd.SendData = saturn_send_data;
 
 			if (!same_game && reset_after_insert_disc)
 			{
 				//saturn_load_rom(filename, "cart.rom", 1);
-				saturn_mount_save(filename, true);
+				// physical disc has no game folder: fixed save name
+				saturn_mount_save(phys ? "physcd" : filename, true);
 				//cheats_init(filename, 0);
 			}
 
@@ -233,6 +246,10 @@ void saturn_set_image(int num, const char *filename)
 	}
 
 	user_io_status_set("[0]", 0);
+
+	// autoboot needs to know a disc actually mounted, not just that the
+	// core was recognised
+	return mounted;
 }
 
 void saturn_reset() {

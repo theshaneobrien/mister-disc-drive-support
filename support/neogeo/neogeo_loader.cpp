@@ -7,6 +7,7 @@
 #include <time.h>   // clock_gettime, CLOCK_REALTIME
 #include "neogeo_loader.h"
 #include "neogeocd.h"
+#include "../physcd/mister_physcd.h"
 #include "../../sxmlc.h"
 #include "../../user_io.h"
 #include "../../fpga_io.h"
@@ -1140,9 +1141,14 @@ void load_neo(char *path)
 
 int neogeo_romset_tx(char* name, int cd_en)
 {
+	// a physical cd disc has no path: the game streams off the disc via
+	// the cdd, this call only loads the cd bios and system roms
+	int phys = !strcmp(name, PHYSCD_SENTINEL);
+
 	char *romset = strrchr(name, '/');
-	if (!romset) return 0;
-	romset++;
+	if (romset) romset++;
+	else if (phys) romset = name;   // sentinel, keep going to load the bios
+	else return 0;
 
 	int system_mvs, system_cdz;
 	static char full_path[1024];
@@ -1269,7 +1275,8 @@ int neogeo_romset_tx(char* name, int cd_en)
 
 	notify_conf();
 
-	FileGenerateSavePath(name, (char*)full_path);
+	// physical disc has no game folder: fixed save name
+	FileGenerateSavePath(phys ? "physcd" : name, (char*)full_path);
 	user_io_file_mount((char*)full_path, 0, 1);
 
 	user_io_status_set("[0]", 0); // Release reset

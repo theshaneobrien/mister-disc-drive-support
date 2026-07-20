@@ -19,6 +19,7 @@
 #include "../megacd/megacd.h"
 #include "../psx/psx.h"
 #include "../saturn/saturn.h"
+#include "../neogeo/neogeocd.h"
 #include "mister_physcd.h"
 #include "physcd_autoboot.h"
 
@@ -56,7 +57,9 @@ static int core_matches(physcd_disc_t t)
 	case PHYSCD_DISC_PSX:    return is_psx();
 	case PHYSCD_DISC_SATURN: return is_saturn();
 	case PHYSCD_DISC_PCECD:  return is_pce();
-	case PHYSCD_DISC_NEOGEO: return is_neogeo_cd();
+	// is_neogeo(), NOT is_neogeo_cd(): a freshly loaded NeoGeo core is
+	// in cart mode; the mount enables cd mode
+	case PHYSCD_DISC_NEOGEO: return is_neogeo();
 	default:                 return 0;
 	}
 }
@@ -66,7 +69,8 @@ static int core_matches(physcd_disc_t t)
    just dumps the user in a bare bios with no disc and no explanation */
 static int mountable(physcd_disc_t t)
 {
-	return t == PHYSCD_DISC_MEGACD || t == PHYSCD_DISC_PSX || t == PHYSCD_DISC_SATURN;
+	return t == PHYSCD_DISC_MEGACD || t == PHYSCD_DISC_PSX
+		|| t == PHYSCD_DISC_SATURN || t == PHYSCD_DISC_NEOGEO;
 }
 
 int physcd_mount_current_core(void)
@@ -79,6 +83,14 @@ int physcd_mount_current_core(void)
 	if (is_psx()) return psx_mount_cd(1, 1, PHYSCD_SENTINEL);
 
 	if (is_saturn()) return saturn_set_image(0, PHYSCD_SENTINEL);
+
+	// NeoGeo core does both cart and CD: switch it to CD mode, then the
+	// game streams off the disc via the shared (megacd) cdd
+	if (is_neogeo())
+	{
+		neocd_set_en(1);
+		return neocd_set_image(PHYSCD_SENTINEL);
+	}
 
 	printf("physcd: core '%s' has no physical disc support yet\n", user_io_get_core_name());
 	return 0;

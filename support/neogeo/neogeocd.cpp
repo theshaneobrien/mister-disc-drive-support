@@ -110,14 +110,17 @@ void set_poll_timer()
 	poll_timer = GetTimer(interval);
 }
 
-void neocd_set_image(char *filename)
+int neocd_set_image(const char *filename)
 {
 	cdd.Unload();
 	cdd.status = CD_STAT_OPEN;
 
 	if (*filename)
 	{
-		neogeo_romset_tx(filename, 1);
+		// romset_tx wants a mutable buffer; it does not modify the name
+		char nm[1024];
+		snprintf(nm, sizeof(nm), "%s", filename);
+		neogeo_romset_tx(nm, 1);
 
 		if (cdd.Load(filename) > 0)
 		{
@@ -133,6 +136,9 @@ void neocd_set_image(char *filename)
 	}
 
 	neocd_reset();
+
+	// autoboot needs to know a disc actually mounted
+	return cdd.loaded;
 }
 
 void neocd_reset() {

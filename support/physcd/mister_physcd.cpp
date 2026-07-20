@@ -982,6 +982,16 @@ physcd_disc_t physcd_identify()
 		}
 	}
 
+	/* neogeo cd: the boot file IPL.TXT is always in the root directory.
+	   the PVD system-id "NGCD" check above is not reliable across all
+	   discs, so scan the directory region for the filename as a robust
+	   fallback. */
+	for (int s = 16; s <= 40; s++) {
+		uint8_t user[2048];
+		if (physcd_read_data2048(base + s, user)) continue;
+		if (memmem(user, sizeof(user), "IPL.TXT", 7)) return PHYSCD_DISC_NEOGEO;
+	}
+
 	if (!physcd_read_sector(base, raw, NULL) &&
 	    !physcd_read_sector(base + 1, raw + PHYSCD_RAW, NULL)) {
 		for (int off = 0; off < (int)sizeof(raw) - 24; off++)

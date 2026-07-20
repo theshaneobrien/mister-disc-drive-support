@@ -47,7 +47,12 @@ what is left:
 
 OUT OF SCOPE, decided:
 - Dreamcast: gd-rom is unreadable in standard cd/dvd drives. the new
-  mega-alpha dreamcast core does not change that.
+  mega-alpha dreamcast core does not change that. (blocked by the DRIVE)
+- Jaguar CD: no support/jaguar CD path exists in Main_MiSTer to hook a
+  toc.phys branch into - the mister jaguar core is cart-only HPS-side.
+  jaguar cds are physically readable, so this becomes possible IF the
+  core ever gains cd support upstream. (blocked by the CORE, not the
+  drive - the opposite of dreamcast.)
 - ao486 (dos/pc): different flow entirely (install to hdd from the disc,
   then run; the disc is a data source, not a bootable game). more an
   "attach the drive to the core" job than pop-in-and-play. deferred,

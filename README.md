@@ -10,13 +10,13 @@ Most of the code here was written with an AI assistant (Claude), with me steerin
 
 ## What works
 
-* MegaCD games boot and play from disc, CD audio tracks included.
-* PlayStation games boot and play from disc.
-* Region is read off the disc. On MegaCD the matching BIOS gets loaded for you (see Setup). On PlayStation the region is detected and handed to the core.
+* MegaCD, PlayStation, Saturn, and NeoGeo CD games boot and play from disc, CD audio tracks included.
+* The disc is identified automatically, so the right core loads for whatever you put in.
+* Region is handled per core, see the Region section below.
 * Autoboot. Drop a disc in at the menu and it loads the right core and mounts the disc, hands free.
 * Manual mode. A Play row at the bottom of the core list, so you load a disc when you want instead of on insert.
 
-Saturn, NeoGeo CD, PC Engine CD, and swapping discs mid game are not done yet. This does what the list above says and nothing more.
+PC Engine CD and swapping discs mid game are not done yet. This does what the list above says and nothing more.
 
 ## What you need
 
@@ -36,9 +36,12 @@ A disc and the console BIOS have to agree on region or a game either refuses to 
 
 * Saturn: the core has its own Region option. Set it to Auto in the core's OSD menu and it reads the region off the disc. One boot.rom is all you need.
 * PlayStation: handled for you. The region is detected and sent to the core.
+* NeoGeo CD: use a Unibios and it is region free, so nothing to set. Otherwise the core's system type (CD or CDZ) has to match your BIOS.
 * MegaCD: the BIOS is the region. Drop boot_EU.rom, boot_US.rom, and boot_JP.rom into the MegaCD home folder and the matching one loads automatically. A plain boot.rom still works as a catch all. Some MegaCD setups also have an Auto region option in the core, so try that first if you have it.
 
 Short version: if a core has an Auto region setting, use it. Otherwise provide the region named BIOS files above.
+
+Each CD core needs its own BIOS in that core's home folder, same as you would for a ripped image: MegaCD boot.rom, PlayStation BIOS, Saturn boot.rom, and a NeoGeo CD BIOS (uni-bioscd.rom, or top-sp1.bin / neocd.bin).
 
 ## Using it
 

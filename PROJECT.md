@@ -480,6 +480,125 @@ small c daemon (reuse probe code) started from user-startup:
 
 acceptance: insert mega cd disc from the main menu, game boots hands-free.
 
+### phase 5b: autoboot from the menu (PLANNED 2026-07-20, do before phase 6)
+
+goal: mister sitting at the menu, disc goes in (or is already there at
+power-on) -> identify it -> osd message "PSX disc detected, loading" ->
+load the matching core -> mount, bios and region already handled by the
+existing mount paths. build this BEFORE adding saturn/ngcd/etc so every
+new core inherits the ux instead of retrofitting it three times.
+
+#### decision: move it INTO main, retire physcdd
+
+physcdd (phase 5) is written but never tested. do not ship it. reasons,
+in order of weight:
+1. CONTENTION. two processes polling /dev/srN is precisely the failure
+   already documented above (cdrdao, zaparoo). main holds the drive
+   open with a prefetch thread hammering it; a second process doing
+   CDROM_DRIVE_STATUS on the same device fights it for the head. doing
+   that to ourselves is self-inflicted.
+2. only main can draw the osd. a daemon would need a new fifo command
+   purely to display text, and would still be blind to menu state.
+3. main knows is_menu(), the core identity and whether the mount
+   succeeded directly. the daemon can only infer via /tmp/CORENAME
+   polling and timeouts.
+4. region/bios selection already lives inside the mount paths in main.
+
+#### hard constraint: the poll CANNOT go in the main loop
+
+main runs two cothreads cooperatively (scheduler.cpp: co_poll =
+user_io_poll/frame_timer/input_poll/video_poll, co_ui = HandleUI/
+OsdUpdate) with a ~1ms budget each - see SPIKE_SCOPE("co_poll", 1000).
+CDROM_DRIVE_STATUS on a spinning-up drive blocks for 100ms+, which
+would stall the ui outright. so media polling lives on a REAL
+background thread (we already have one) and main only consumes an
+event in O(1).
+
+#### backend api to add (mister_physcd.h)
+
+    typedef enum { PHYSCD_EV_NONE, PHYSCD_EV_DISC_IN, PHYSCD_EV_DISC_OUT } physcd_event_t;
+    int  physcd_watch_start(void);   // passive media watch, drive held open
+    void physcd_watch_stop(void);
+    physcd_event_t physcd_poll_event(physcd_disc_t *type, physcd_region_t *region);
+
+watcher thread: every ~2s CDROM_DRIVE_STATUS + CDROM_MEDIA_CHANGED; on
+new media run load_toc + identify + region ONCE and publish the event
+under the existing mutex. it must NOT identify or read while a mount is
+active - the prefetcher owns the drive then; the watcher degrades to a
+pure status poll.
+
+#### main-side state machine (new support/physcd/physcd_autoboot.cpp)
+
+called from the co_ui side, cheap, non-blocking:
+  IDLE -> (DISC_IN) -> ANNOUNCE -> LOAD -> WAIT_CORE -> MOUNT -> DONE
+                                                     \-> FAILED
+- ANNOUNCE: Info("PSX disc detected\nLoading core...", ...) then DWELL
+  ~1.5s before loading. this dwell is REQUIRED, not cosmetic:
+  fpga_load_rbf() begins with OsdDisable() (fpga_io.cpp:428), so the
+  message is wiped the instant the load starts - without the dwell the
+  user never reads it.
+- LOAD: resolve rbf, fpga_load_rbf(path, NULL, NULL).
+- WAIT_CORE: poll is_<type>() until true plus a settle delay. core
+  identity comes from user_io_read_core_name() resetting the is_*
+  caches (user_io.cpp:420), so it is available in-process - no need to
+  read /tmp/CORENAME like the daemon did.
+- MOUNT: call the shared dispatcher (below).
+- DONE: second Info() naming the game (psx has the game id; megacd has
+  the region) - the first message is gone by now.
+- FAILED: Info() with the reason, then LATCH until the next media
+  change. without the latch a failing disc reloads the core forever.
+
+#### trigger policy (important - do not hijack an active game)
+
+- is_menu() -> full autoboot.
+- a MATCHING cd core already running -> mount only. this is disc swap
+  (phase 7) almost for free.
+- any other core running -> ignore entirely.
+
+#### reuse, do not reinvent
+
+- rbf resolution: bootcore.cpp already has findCore(), which recurses
+  the _* dirs, prefers an exact name match and otherwise takes the
+  NEWEST by date - exactly what the daemon reimplemented. GOTCHA: the
+  declaration in bootcore.h:12 is STALE (3-arg char* version) and does
+  not match the static 2-arg CoreMatch version in the .cpp, so it will
+  not link. add a properly declared wrapper next to it rather than
+  trusting that header line.
+- mount dispatch: factor the core-type switch currently inside the
+  mount_phys fifo handler (input.cpp) into one shared function so the
+  fifo command and autoboot cannot drift apart.
+- disc type -> core name for findCore: MEGACD->"MegaCD", PSX->"PSX",
+  SATURN->"Saturn", PCECD->"TurboGrafx16", NEOGEO->"NeoGeo".
+
+#### config (cfg.cpp/cfg.h + MiSTer.ini)
+
+    physcd_autoboot=1     ; 0 off, 1 menu only (default), 2 also swap
+    physcd_device=        ; optional pin, e.g. /dev/sr1
+
+#### edge cases that must be handled
+
+1. disc already in at power-on: do not race bootcore_init. bootcore
+   wins at startup; autoboot only acts once the menu is settled.
+2. failure latch, per above.
+3. audio cd / unknown disc: message, load nothing.
+4. the drive is now held open for the whole session, so external tools
+   (physcd_probe over ssh, zaparoo) must not touch it while mister
+   runs. document loudly.
+5. Info() only renders when menustate <= MENU_INFO (menu.cpp:7962), so
+   a user deep in a submenu will not see it - consider MenuHide() first.
+6. autoboot=0 must leave `mount_phys` working exactly as today.
+
+#### phasing and acceptance
+
+- 5b.1 watcher api, no behaviour change; prove it by logging events
+- 5b.2 state machine + messages, menu-only autoboot
+      ACCEPT: insert sonic cd at the menu -> message -> megacd core ->
+      game boots hands-free. same for x-files/psx.
+- 5b.3 config + rbf resolution via the bootcore wrapper
+      ACCEPT: physcd_autoboot=0 disables it; mount_phys unaffected
+- 5b.4 swap into an already-running matching core
+- 5b.5 delete physcdd.c and its docs references
+
 ### phase 6: more cores
 
 test media ON HAND (2026-07-19): psx, saturn, neogeo cd, pc dos

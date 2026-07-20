@@ -5513,6 +5513,15 @@ void HandleUI(void)
 				char type = flist_SelectedItem()->de.d_type;
 				memcpy(name, flist_SelectedItem()->de.d_name, sizeof(name));
 
+				// physcd: the pinned "Play Disc" row is a synthetic
+				// entry, not a file - load the physical disc instead of
+				// trying to open it as a core (execs on success)
+				if (physcd_is_menu_row(name))
+				{
+					physcd_autoboot_load_disc();
+					break;
+				}
+
 				if ((fs_Options & SCANO_UMOUNT) && (is_megacd() || is_pce() || is_cdi() || is_neogeo() || (is_psx() && !(fs_Options & SCANO_SAVES)) || is_saturn() || is_3do()) && type == DT_DIR && strcmp(flist_SelectedItem()->de.d_name, ".."))
 				{
 					int len = strlen(selPath);
@@ -7644,6 +7653,15 @@ void HandleUI(void)
 			// banner has already scheduled the slow 1000ms wake, so the
 			// first banner frame would hold for a second
 			physcd_autoboot_menu_tick();
+
+			// a disc went in or out while sitting on the core browser:
+			// rebuild the list so the Play Disc row appears/disappears
+			// without the user having to navigate away and back
+			if (physcd_menu_dirty() && menustate == MENU_FILE_SELECT2 && (fs_Options & SCANO_CORES))
+			{
+				ScanDirectory(selPath, SCANF_INIT, fs_pFileExt, fs_Options);
+				menustate = MENU_FILE_SELECT1;
+			}
 
 			// physcd autoboot needs the fast tick too: its banner has to
 			// get screen time before fpga_load_rbf disables the osd

@@ -1796,6 +1796,26 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 		if (!flist_nDirEntries()) return 0;
 
 		std::sort(DirItem.begin(), DirItem.end(), DirentComp());
+
+		/* physcd: pin a "Play Disc" row at the top of the menu core list
+		   when a physical disc is in the drive, so it is a normal cursor
+		   target - A on it plays the disc, A on a core loads the core,
+		   no button conflict. after the sort so it stays on top; before
+		   the reselect so the remembered-core index stays correct. */
+		if (options & SCANO_CORES)
+		{
+			char row[256];
+			if (physcd_menu_row(row, sizeof(row)))
+			{
+				direntext_t d;
+				memset(&d, 0, sizeof(d));
+				snprintf(d.de.d_name, sizeof(d.de.d_name), "%s", PHYSCD_MENU_SENTINEL);
+				d.de.d_type = DT_REG;
+				snprintf(d.altname, sizeof(d.altname), "%s", row);
+				DirItem.insert(DirItem.begin(), d);
+			}
+		}
+
 		if (file_name[0])
 		{
 			int pos = -1;

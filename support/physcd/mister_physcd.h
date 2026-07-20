@@ -149,6 +149,18 @@ physcd_event_t physcd_poll_event(physcd_disc_t *type, physcd_region_t *region, i
 // identified from the first one's toc and cached sectors.
 void physcd_forget_disc(void);
 
+// human-readable name from the iso9660 volume label ("SONIC CD"), for
+// the menu. blocking (reads the disc); returns strlen, 0 if none.
+int physcd_disc_label(char *out, int outsz);
+
+// O(1) snapshot for the menu row, safe from the ui thread: 1 if a disc
+// is present, filling *type and a display name (label or console name).
+int physcd_menu_status(char *name, int namesz, physcd_disc_t *type);
+
+// edge-triggered: returns 1 once after the disc presence changed, so the
+// menu can rebuild the core list to add/remove the Play Disc row.
+int physcd_menu_dirty(void);
+
 void physcd_close();
 
 #endif

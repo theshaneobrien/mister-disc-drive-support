@@ -87,8 +87,11 @@ void physcd_autoboot_startup(void)
 {
 	int want = 0;
 
-	if (!cfg.physcd_autoboot) return;
-
+	/* NB: not gated on cfg.physcd_autoboot. autoboot=0 means "do not
+	   AUTO-load on insert", not "ignore the drive": the menu still
+	   watches so the Load Disc row can appear, and a marker written by
+	   that row must still be honoured here. only the auto-load trigger
+	   in the menu tick checks the flag. */
 	FILE *f = fopen(MARKER, "r");
 	if (!f)
 	{
@@ -173,6 +176,67 @@ static int ab_latched = 0;      /* do not retry this disc forever */
 
 static void banner_clear(void);
 
+/* resolve rbf, write the phase-B handoff marker, release the drive and
+   load. shared by the auto-load banner and the menu "Load Disc" row.
+   on success it execs and never returns; returns 0 only on failure. */
+static int do_load(physcd_disc_t type, const char *rbf)
+{
+	FILE *f = fopen(MARKER, "w");
+	if (f) { fprintf(f, "%d\n", (int)type); fclose(f); }
+
+	/* release the drive before the exec, or the prefetch thread can be
+	   mid-SG_IO when the process is torn down and leave the device
+	   busy for our successor */
+	physcd_watch_stop();
+	printf("physcd: loading %s for %s disc\n", rbf, physcd_disc_name(type));
+
+	/* USUALLY execs and never returns, but returns -1 when the rbf
+	   cannot be opened - undo the handoff so a stale marker does not
+	   hijack the next manually loaded core */
+	if (fpga_load_rbf(rbf) < 0)
+	{
+		unlink(MARKER);
+		physcd_watch_start();
+		return 0;
+	}
+	return 1;   /* not reached on success */
+}
+
+int physcd_is_menu_row(const char *name)
+{
+	return name && !strcmp(name, PHYSCD_MENU_SENTINEL);
+}
+
+int physcd_menu_row(char *out, int outsz)
+{
+	physcd_disc_t t = PHYSCD_DISC_NONE;
+	char label[64];
+	if (!physcd_menu_status(label, sizeof(label), &t)) return 0;
+	if (!mountable(t)) return 0;   /* only offer discs we can boot+mount */
+
+	if (label[0]) snprintf(out, outsz, "Play Disc: %s", label);
+	else          snprintf(out, outsz, "Play %s Disc", physcd_disc_name(t));
+	return 1;
+}
+
+/* the menu "Load Disc" row: load + mount whatever readable disc is in
+   the drive right now. execs on success, returns 0 if nothing to do. */
+int physcd_autoboot_load_disc(void)
+{
+	physcd_disc_t t = PHYSCD_DISC_NONE;
+	if (!physcd_menu_status(NULL, 0, &t)) return 0;   /* no disc */
+	if (!mountable(t)) return 0;
+
+	const char *core = core_name_for(t);
+	char rbf[1024];
+	if (!core || !find_core_rbf(core, rbf, sizeof(rbf)))
+	{
+		printf("physcd: no rbf for %s disc\n", physcd_disc_name(t));
+		return 0;
+	}
+	return do_load(t, rbf);
+}
+
 int physcd_autoboot_busy(void)
 {
 	/* AB_FAILED must be included or its countdown runs at the slow
@@ -211,16 +275,11 @@ static void banner_clear(void)
 
 int physcd_autoboot_menu_tick(void)
 {
-	if (!cfg.physcd_autoboot) return 0;
-
-	/* bootcore is counting down and owns these very osd lines - do not
-	   fight it, and do not steal a boot the user configured */
-	if (cfg.bootcore[0] != '\0' && btimeout > 0) return 0;
-
 	/* watching normally starts at boot, but a usb drive often has not
 	   enumerated by then - and the user may plug one in later. retry,
 	   but gate the BLOCKING open behind a cheap stat so the ui pays
-	   nothing while no drive node exists. */
+	   nothing while no drive node exists. this runs even with autoboot
+	   OFF so the manual Load Disc row can still see the disc. */
 	if (!physcd_watching())
 	{
 		static unsigned long retry = 0;
@@ -235,7 +294,16 @@ int physcd_autoboot_menu_tick(void)
 			if (!access(p, R_OK)) any = 1;
 		}
 		if (!any || physcd_watch_start()) return 0;
+		return 0;
 	}
+
+	/* autoboot=0 is MANUAL mode: keep watching (above) so the menu row
+	   works, but never auto-load on insert */
+	if (!cfg.physcd_autoboot) return 0;
+
+	/* bootcore is counting down and owns these very osd lines - do not
+	   fight it, and do not steal a boot the user configured */
+	if (cfg.bootcore[0] != '\0' && btimeout > 0) return 0;
 
 	physcd_disc_t type = PHYSCD_DISC_NONE;
 	physcd_region_t region = PHYSCD_REGION_UNKNOWN;
@@ -316,28 +384,9 @@ int physcd_autoboot_menu_tick(void)
 		if (++ab_ticks >= 15)        /* ~1.5s at the 100ms tick */
 		{
 			ab_state = AB_LOADING;
-
-			/* hand off to the process that replaces us */
-			FILE *f = fopen(MARKER, "w");
-			if (f) { fprintf(f, "%d\n", (int)ab_type); fclose(f); }
-
-			/* release the drive before the exec, or the prefetch
-			   thread can be mid-SG_IO when the process is torn down
-			   and leave the device busy for our successor */
-			physcd_watch_stop();
-
-			printf("physcd: autoboot loading %s\n", ab_rbf);
-
-			/* USUALLY does not return - it execs. but it DOES return
-			   -1 without exec'ing when the rbf cannot be opened (a
-			   truncated path, a yanked card, a read error), so the
-			   pre-load side effects have to be undone or we sit in
-			   AB_LOADING forever with a stale marker that would
-			   hijack the next core the user loads by hand. */
-			if (fpga_load_rbf(ab_rbf) < 0)
+			/* do_load execs on success; only returns on failure */
+			if (!do_load(ab_type, ab_rbf))
 			{
-				unlink(MARKER);
-				physcd_watch_start();
 				ab_state = AB_FAILED;
 				ab_ticks = 0;
 				ab_latched = 1;

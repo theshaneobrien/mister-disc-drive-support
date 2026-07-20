@@ -150,9 +150,13 @@ static struct {
 	volatile int ev_type;
 	volatile int ev_region;
 	volatile int ev_initial;      /* disc was already in at watch start */
+	int watch_present;            /* menu snapshot, guarded by pcd.lock */
+	int watch_type;
+	char watch_label[64];
+	volatile int watch_dirty;     /* presence changed since last query  */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0 };
 
 static int track_of(int lba)
 {
@@ -511,18 +515,36 @@ static void *prefetch_thread(void *arg)
 						printf("physcd: disc present but unreadable, retrying\n");
 					}
 					else {
+						/* capture a display label now, on this thread,
+						   so the menu query stays O(1) and non-blocking */
+						char lbl[64];
+						physcd_disc_label(lbl, sizeof(lbl));
+						pthread_mutex_lock(&pcd.lock);
+						snprintf(pcd.watch_label, sizeof(pcd.watch_label), "%s", lbl);
+						pcd.watch_type = (int)t;
+						if (!pcd.watch_present) pcd.watch_dirty = 1;
+						pcd.watch_present = 1;
+						pthread_mutex_unlock(&pcd.lock);
+
 						pcd.ev_type = (int)t;
 						pcd.ev_region = (int)r;
 						pcd.ev_initial = (was_present < 0) ? 1 : 0;
 						pcd.ev = (int)PHYSCD_EV_DISC_IN;
-						printf("physcd: disc detected: %s%s%s\n",
+						printf("physcd: disc detected: %s%s%s%s%s\n",
 							physcd_disc_name(t),
 							*physcd_region_name(r) ? " region " : "",
-							physcd_region_name(r));
+							physcd_region_name(r),
+							lbl[0] ? " - " : "", lbl);
 						was_present = 1;
 					}
 				}
 				else if (!present && was_present == 1) {
+					pthread_mutex_lock(&pcd.lock);
+					if (pcd.watch_present) pcd.watch_dirty = 1;
+					pcd.watch_present = 0;
+					pcd.watch_label[0] = 0;
+					pthread_mutex_unlock(&pcd.lock);
+
 					pcd.ev = (int)PHYSCD_EV_DISC_OUT;
 					printf("physcd: disc removed\n");
 					was_present = 0;
@@ -1032,6 +1054,51 @@ const char *physcd_region_name(physcd_region_t r)
 	}
 }
 
+/*
+ * a human-readable name for the menu. the iso9660 volume label is the
+ * one name field present on every data disc regardless of console -
+ * "SONIC_CD", "FF8_DISK1" etc - so use that. d-characters forbid
+ * spaces, so labels conventionally use '_' for them: convert back for
+ * display. returns strlen written, 0 when there is no usable label.
+ */
+int physcd_disc_label(char *out, int outsz)
+{
+	uint8_t user[2048];
+
+	if (!out || outsz < 2) return 0;
+	out[0] = 0;
+
+	if (!physcd_disc_present()) return 0;
+	if (pcd.first_data_lba < 0) {
+		toc_t tmp;
+		if (physcd_load_toc(&tmp)) return 0;
+		if (pcd.first_data_lba < 0) return 0;   /* audio cd, no label */
+	}
+
+	/* iso9660 primary volume descriptor lives at logical sector 16 */
+	if (physcd_read_data2048(pcd.first_data_lba + 16, user)) return 0;
+	if (user[0] != 1 || memcmp(user + 1, "CD001", 5)) return 0;
+
+	/* volume identifier: 32 bytes at offset 40, space-padded */
+	char lbl[33];
+	memcpy(lbl, user + 40, 32);
+	lbl[32] = 0;
+
+	int end = 32;
+	while (end > 0 && (lbl[end - 1] == ' ' || lbl[end - 1] == 0)) end--;
+	lbl[end] = 0;
+
+	for (int i = 0; i < end; i++) {
+		if (lbl[i] == '_') lbl[i] = ' ';
+		/* drop anything non-printable so a mangled label can't corrupt
+		   the osd row */
+		else if (lbl[i] < 0x20 || (uint8_t)lbl[i] > 0x7E) lbl[i] = ' ';
+	}
+
+	snprintf(out, outsz, "%s", lbl);
+	return strlen(out);
+}
+
 const char *physcd_disc_name(physcd_disc_t t)
 {
 	switch (t) {
@@ -1065,6 +1132,34 @@ void physcd_watch_stop(void)
 int physcd_watching(void)
 {
 	return pcd.watch_mode;
+}
+
+/* O(1) snapshot for the menu row - reads cached watcher state, never
+   touches the drive, safe from the ui thread. returns 1 if a disc is
+   present, filling type and a display name (label if we got one, else
+   the console name). */
+int physcd_menu_status(char *name, int namesz, physcd_disc_t *type)
+{
+	pthread_mutex_lock(&pcd.lock);
+	int present = pcd.watch_present;
+	int t = pcd.watch_type;
+	if (name && namesz > 0) {
+		if (pcd.watch_label[0]) snprintf(name, namesz, "%s", pcd.watch_label);
+		else snprintf(name, namesz, "%s", physcd_disc_name((physcd_disc_t)t));
+	}
+	pthread_mutex_unlock(&pcd.lock);
+
+	if (type) *type = (physcd_disc_t)t;
+	return present;
+}
+
+/* edge-triggered: 1 once after the disc presence changed, so the menu
+   can rebuild the core list to add/remove the Play Disc row. */
+int physcd_menu_dirty(void)
+{
+	int d = pcd.watch_dirty;
+	pcd.watch_dirty = 0;
+	return d;
 }
 
 physcd_event_t physcd_poll_event(physcd_disc_t *type, physcd_region_t *region, int *initial)

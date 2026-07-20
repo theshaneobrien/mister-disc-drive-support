@@ -4,13 +4,15 @@ project handoff doc. self-contained: everything verified so far, the
 architecture, and a phased task list with acceptance criteria. companion
 files ship alongside this doc:
 
-- `physcd_probe.c` + `physcd_probe` (prebuilt static armhf binary)
-- `mister_physcd.h` / `mister_physcd.cpp` (backend scaffold, superseded
-  by the copy in the fork, kept for reference)
+- `physcd_probe.c` + `physcd_probe` (prebuilt static armhf drive-check tool)
 - `PATCHPOINTS.md` (per-core integration map, treat as part of this doc)
-- `physcdd.c` + `physcdd` (phase 5 autodetect daemon, static armhf)
-- `Main_MiSTer/` (the fork, branch `physcd`, builds clean)
+- `Main_MiSTer/` (the fork, branch `physcd`, builds clean) - the real
+  backend lives here in `support/physcd/`
 - `tools/` (windows docker cross-compile: `.\tools\build.ps1`)
+
+(the root `mister_physcd.*` scaffold and the `physcdd` daemon were
+removed in the cleanup pass - the scaffold was a stale prototype of the
+fork copy, and physcdd was retired into main and never shipped.)
 
 ## 0. status
 

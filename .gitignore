@@ -1,3 +1,10 @@
 # the Main_MiSTer fork is its own git repo (branch physcd), pushed to the
 # same remote as branch `physcd`. see PROJECT.md section 4.
 Main_MiSTer/
+
+# build artifacts. physcd_probe (the static armhf tool) IS committed as a
+# convenience, so it is not ignored - but its object files and the retired
+# physcdd daemon must never come back.
+*.o
+physcdd
+physcd_probe.o

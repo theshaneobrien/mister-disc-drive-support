@@ -123,6 +123,7 @@ int main(int argc, char *argv[])
 		user_io_poll();
 		frame_timer();
 		input_poll(0);
+		physcd_autoboot_poll();
 		HandleUI();
 		OsdUpdate();
 	}

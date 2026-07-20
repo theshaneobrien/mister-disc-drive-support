@@ -149,9 +149,10 @@ static struct {
 	volatile int ev;              /* physcd_event_t, pending        */
 	volatile int ev_type;
 	volatile int ev_region;
+	volatile int ev_initial;      /* disc was already in at watch start */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0 };
 
 static int track_of(int lba)
 {
@@ -479,25 +480,55 @@ static void *prefetch_thread(void *arg)
 			if (now_ms() - last_watch >= 2000) {
 				last_watch = now_ms();
 
+				/* the drive can drop off the bus while we sit at the
+				   menu too - the prefetch path's re-attach never runs
+				   here, so check it ourselves or the fd stays stale
+				   and autoboot is dead for the session */
+				if (device_gone() && now_ms() - last_reattach > 5000) {
+					last_reattach = now_ms();
+					try_reattach();
+					was_present = -1;
+				}
+
 				int present = physcd_disc_present();
 				int changed = physcd_media_changed();
 
 				if (present && (was_present != 1 || changed)) {
+					/* MUST forget the previous disc first: identify
+					   only loads a toc when first_data_lba < 0, so a
+					   second disc in one menu session would otherwise
+					   be identified from the FIRST disc's toc and its
+					   stale cached sectors */
+					physcd_forget_disc();
+
 					physcd_disc_t t = physcd_identify();
 					physcd_region_t r = physcd_region();
-					pcd.ev_type = (int)t;
-					pcd.ev_region = (int)r;
-					pcd.ev = (int)PHYSCD_EV_DISC_IN;
-					printf("physcd: disc detected: %s%s%s\n",
-						physcd_disc_name(t),
-						*physcd_region_name(r) ? " region " : "",
-						physcd_region_name(r));
+
+					if (t == PHYSCD_DISC_NONE) {
+						/* could not read it at all - do not latch, let
+						   the next poll try again (a drive still
+						   spinning up reports exactly this) */
+						printf("physcd: disc present but unreadable, retrying\n");
+					}
+					else {
+						pcd.ev_type = (int)t;
+						pcd.ev_region = (int)r;
+						pcd.ev_initial = (was_present < 0) ? 1 : 0;
+						pcd.ev = (int)PHYSCD_EV_DISC_IN;
+						printf("physcd: disc detected: %s%s%s\n",
+							physcd_disc_name(t),
+							*physcd_region_name(r) ? " region " : "",
+							physcd_region_name(r));
+						was_present = 1;
+					}
 				}
 				else if (!present && was_present == 1) {
 					pcd.ev = (int)PHYSCD_EV_DISC_OUT;
 					printf("physcd: disc removed\n");
+					was_present = 0;
 				}
-				was_present = present ? 1 : 0;
+				else if (present) was_present = 1;
+				else was_present = 0;
 			}
 			struct timespec ts = { 0, 50 * 1000 * 1000 };
 			nanosleep(&ts, NULL);
@@ -599,14 +630,14 @@ static int open_drive(char *out, int outsz)
 	int spare = -1;
 
 	if (pref_dev[0]) {
-		int fd = open(pref_dev, O_RDONLY | O_NONBLOCK);
+		int fd = open(pref_dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 		if (fd >= 0) { snprintf(out, outsz, "%s", pref_dev); return fd; }
 		printf("physcd: %s not available (%s), scanning\n", pref_dev, strerror(errno));
 	}
 
 	for (int i = 0; i < 8; i++) {
 		snprintf(path, sizeof(path), "/dev/sr%d", i);
-		int fd = open(path, O_RDONLY | O_NONBLOCK);
+		int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 		if (fd < 0) continue;
 
 		if (ioctl(fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) == CDS_DISC_OK) {
@@ -1036,15 +1067,32 @@ int physcd_watching(void)
 	return pcd.watch_mode;
 }
 
-physcd_event_t physcd_poll_event(physcd_disc_t *type, physcd_region_t *region)
+physcd_event_t physcd_poll_event(physcd_disc_t *type, physcd_region_t *region, int *initial)
 {
 	physcd_event_t e = (physcd_event_t)pcd.ev;
 	if (e == PHYSCD_EV_NONE) return e;
 
+	/* read the payload BEFORE clearing ev: the watcher only ever
+	   publishes ev last, so this ordering cannot see a torn event */
 	if (type) *type = (physcd_disc_t)pcd.ev_type;
 	if (region) *region = (physcd_region_t)pcd.ev_region;
+	if (initial) *initial = pcd.ev_initial;
 	pcd.ev = (int)PHYSCD_EV_NONE;
 	return e;
+}
+
+/* drop everything we know about the disc in the drive, so the next
+   identify re-reads the toc instead of trusting the last one */
+void physcd_forget_disc(void)
+{
+	pcd.first_data_lba = -1;
+	pcd.leadout = 0;
+	pcd.ntrk = 0;
+	if (pcd.cache) {
+		pthread_mutex_lock(&pcd.lock);
+		for (int i = 0; i < CACHE_SECTORS; i++) pcd.cache[i].lba = -1;
+		pthread_mutex_unlock(&pcd.lock);
+	}
 }
 
 void physcd_close()

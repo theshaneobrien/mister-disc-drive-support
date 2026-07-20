@@ -21,8 +21,12 @@
 #include "mister_physcd.h"
 #include "physcd_autoboot.h"
 
-/* survives the exec, which is the whole point - see the header */
-#define MARKER "/tmp/physcd_autoboot"
+/* both survive the exec, which is the whole point - see the header */
+#define MARKER "/tmp/physcd_autoboot"   /* phase A -> phase B, one-shot   */
+#define BOOTED "/tmp/physcd_booted"     /* what we last booted from disc  */
+
+static unsigned long pending_mount = 0;
+static physcd_disc_t pending_type = PHYSCD_DISC_NONE;
 
 /*
  * disc type -> core name for findCore.
@@ -56,19 +60,22 @@ static int core_matches(physcd_disc_t t)
 	}
 }
 
+/* can we actually MOUNT this disc type? core_name_for knows about
+   cores we can boot to, but booting to a core that then cannot mount
+   just dumps the user in a bare bios with no disc and no explanation */
+static int mountable(physcd_disc_t t)
+{
+	return t == PHYSCD_DISC_MEGACD || t == PHYSCD_DISC_PSX;
+}
+
 int physcd_mount_current_core(void)
 {
-	if (is_megacd())
-	{
-		mcd_set_image(0, PHYSCD_SENTINEL);
-		return 1;
-	}
-	if (is_psx())
-	{
-		// f_index/s_index as the menu uses for the cd slot
-		psx_mount_cd(1, 1, PHYSCD_SENTINEL);
-		return 1;
-	}
+	// returns whether a disc really mounted, not merely whether the
+	// core was recognised - autoboot reports success from this
+	if (is_megacd()) return mcd_set_image(0, PHYSCD_SENTINEL);
+
+	// f_index/s_index as the menu uses for the cd slot
+	if (is_psx()) return psx_mount_cd(1, 1, PHYSCD_SENTINEL);
 
 	printf("physcd: core '%s' has no physical disc support yet\n", user_io_get_core_name());
 	return 0;
@@ -115,19 +122,42 @@ void physcd_autoboot_startup(void)
 	/* "user_io_init returned" is HPS-side readiness only and says
 	   nothing about the core's own cpu/bios being up. there is no
 	   handshake to wait on - MGL exists precisely because cores need
-	   wall-clock time after this point - so dwell, then mount. */
-	int delay = cfg.physcd_mount_delay ? cfg.physcd_mount_delay : 2;
-	printf("physcd: autoboot - waiting %ds for the %s core to settle\n", delay, want_name);
-	sleep(delay);
+	   wall-clock time after this point - so dwell, then mount.
+	   the dwell is a TIMER, not sleep(): this runs before the main
+	   loop, so sleeping here would leave the fresh core with no
+	   user_io_poll, no osd and no input for the duration. */
+	pending_mount = GetTimer(cfg.physcd_mount_delay * 1000);
+	pending_type = (physcd_disc_t)want;
+	printf("physcd: autoboot - mounting the %s disc in %ds\n",
+		want_name, cfg.physcd_mount_delay);
+}
 
-	if (!physcd_mount_current_core()) return;
+void physcd_autoboot_poll(void)
+{
+	if (!pending_mount || !CheckTimer(pending_mount)) return;
+	pending_mount = 0;
+
+	int ok = physcd_mount_current_core();
 
 	/* Info() works here: no menu is open in a freshly loaded core */
 	char msg[128];
-	const char *id = is_psx() ? psx_get_game_id() : NULL;
-	if (id && *id) snprintf(msg, sizeof(msg), "Disc mounted\n%s", id);
-	else snprintf(msg, sizeof(msg), "Disc mounted");
-	Info(msg, 3000);
+	if (ok)
+	{
+		const char *id = is_psx() ? psx_get_game_id() : NULL;
+		if (id && *id) snprintf(msg, sizeof(msg), "Disc mounted\n%s", id);
+		else snprintf(msg, sizeof(msg), "%s disc mounted", physcd_disc_name(pending_type));
+
+		/* remember what we booted, so returning to the menu with this
+		   same disc still in the drive does not autoboot it all over
+		   again and make the menu unreachable */
+		FILE *b = fopen(BOOTED, "w");
+		if (b) { fprintf(b, "%d\n", (int)pending_type); fclose(b); }
+	}
+	else
+	{
+		snprintf(msg, sizeof(msg), "Disc could not be read");
+	}
+	Info(msg, ok ? 3000 : 5000);
 }
 
 // ------------------------------------------------------ phase A: the menu
@@ -141,9 +171,23 @@ static physcd_region_t ab_region = PHYSCD_REGION_UNKNOWN;
 static char ab_rbf[1024] = {};
 static int ab_latched = 0;      /* do not retry this disc forever */
 
+static void banner_clear(void);
+
 int physcd_autoboot_busy(void)
 {
-	return ab_state == AB_BANNER || ab_state == AB_LOADING;
+	/* AB_FAILED must be included or its countdown runs at the slow
+	   1000ms menu tick and a 30-tick banner sits for 30 seconds */
+	return ab_state != AB_IDLE;
+}
+
+void physcd_autoboot_cancel(void)
+{
+	if (ab_state == AB_IDLE) return;
+	printf("physcd: autoboot cancelled\n");
+	ab_state = AB_IDLE;
+	ab_ticks = 0;
+	ab_latched = 1;              /* until this disc is ejected */
+	banner_clear();
 }
 
 static void banner(const char *l1, const char *l2)
@@ -154,7 +198,15 @@ static void banner(const char *l1, const char *l2)
 	OsdWrite(13, s, 0, 0);
 	snprintf(s, sizeof(s), " %s", l2 ? l2 : "");
 	OsdWrite(14, s, 0, 0);
-	OsdWrite(15, "", 0, 0);
+	OsdWrite(15, "   Press any key to cancel", 0, 0);
+}
+
+/* the banner paints over the menu's own rows 12-15, so anything that
+   leaves a banner state has to put them back or the stale text sits
+   over the file browser until some unrelated redraw */
+static void banner_clear(void)
+{
+	for (int i = 12; i <= 15; i++) OsdWrite(i, "", 0, 0);
 }
 
 int physcd_autoboot_menu_tick(void)
@@ -165,33 +217,75 @@ int physcd_autoboot_menu_tick(void)
 	   fight it, and do not steal a boot the user configured */
 	if (cfg.bootcore[0] != '\0' && btimeout > 0) return 0;
 
-	/* watching is started once at boot (see physcd_autoboot_startup):
-	   opening the drive blocks, and this tick runs on the ui side */
-	if (!physcd_watching()) return 0;
+	/* watching normally starts at boot, but a usb drive often has not
+	   enumerated by then - and the user may plug one in later. retry,
+	   but gate the BLOCKING open behind a cheap stat so the ui pays
+	   nothing while no drive node exists. */
+	if (!physcd_watching())
+	{
+		static unsigned long retry = 0;
+		if (retry && !CheckTimer(retry)) return 0;
+		retry = GetTimer(3000);
+
+		int any = 0;
+		for (int i = 0; i < 8 && !any; i++)
+		{
+			char p[32];
+			snprintf(p, sizeof(p), "/dev/sr%d", i);
+			if (!access(p, R_OK)) any = 1;
+		}
+		if (!any || physcd_watch_start()) return 0;
+	}
 
 	physcd_disc_t type = PHYSCD_DISC_NONE;
 	physcd_region_t region = PHYSCD_REGION_UNKNOWN;
-	physcd_event_t ev = physcd_poll_event(&type, &region);
+	int initial = 0;
+	physcd_event_t ev = physcd_poll_event(&type, &region, &initial);
 
 	if (ev == PHYSCD_EV_DISC_OUT)
 	{
 		ab_latched = 0;              /* new media clears the latch */
-		if (ab_state != AB_LOADING) ab_state = AB_IDLE;
+		unlink(BOOTED);              /* and forgets what we booted */
+		if (ab_state != AB_LOADING)
+		{
+			if (ab_state != AB_IDLE) banner_clear();
+			ab_state = AB_IDLE;
+		}
 		return 0;
 	}
 
 	if (ev == PHYSCD_EV_DISC_IN && !ab_latched && ab_state == AB_IDLE)
 	{
+		/* a disc that was ALREADY in the drive when we started
+		   watching, and that we booted last time, must not boot
+		   again - otherwise quitting a game back to the menu
+		   immediately relaunches it and the menu is unreachable */
+		if (initial)
+		{
+			int last = 0;
+			FILE *b = fopen(BOOTED, "r");
+			if (b) { if (fscanf(b, "%d", &last) != 1) last = 0; fclose(b); }
+			if (last == (int)type)
+			{
+				printf("physcd: %s disc already booted, not repeating\n",
+					physcd_disc_name(type));
+				ab_latched = 1;
+				return 0;
+			}
+		}
+
 		ab_type = type;
 		ab_region = region;
 		ab_ticks = 0;
 
-		const char *core = core_name_for(type);
+		const char *core = mountable(type) ? core_name_for(type) : NULL;
 		if (!core)
 		{
 			ab_state = AB_FAILED;
 			ab_latched = 1;
-			banner(physcd_disc_name(type), "No core for this disc");
+			/* booting a core we cannot then mount into is worse than
+			   doing nothing: it strands the user in a bare bios */
+			banner(physcd_disc_name(type), "Not supported yet");
 			return 1;
 		}
 
@@ -233,13 +327,38 @@ int physcd_autoboot_menu_tick(void)
 			physcd_watch_stop();
 
 			printf("physcd: autoboot loading %s\n", ab_rbf);
-			fpga_load_rbf(ab_rbf);   /* does not return */
+
+			/* USUALLY does not return - it execs. but it DOES return
+			   -1 without exec'ing when the rbf cannot be opened (a
+			   truncated path, a yanked card, a read error), so the
+			   pre-load side effects have to be undone or we sit in
+			   AB_LOADING forever with a stale marker that would
+			   hijack the next core the user loads by hand. */
+			if (fpga_load_rbf(ab_rbf) < 0)
+			{
+				unlink(MARKER);
+				physcd_watch_start();
+				ab_state = AB_FAILED;
+				ab_ticks = 0;
+				ab_latched = 1;
+				banner(physcd_disc_name(ab_type), "Core load failed");
+			}
 		}
 		return 1;
 	}
 
+	case AB_LOADING:
+		/* only reachable if the exec somehow did not happen; the
+		   failure path above normally moves us out of here */
+		return 1;
+
 	case AB_FAILED:
-		if (++ab_ticks >= 30) { ab_state = AB_IDLE; ab_ticks = 0; }
+		if (++ab_ticks >= 30)    /* ~3s: busy() keeps the 100ms tick */
+		{
+			banner_clear();
+			ab_state = AB_IDLE;
+			ab_ticks = 0;
+		}
 		return 1;
 
 	default:

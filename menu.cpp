@@ -1241,6 +1241,10 @@ void HandleUI(void)
 
 	if (c && cfg.bootcore[0] != '\0') cfg.bootcore[0] = '\0';
 
+	// same courtesy for disc autoboot: any key abandons it, so a disc
+	// left in the drive can never trap the user out of the menu
+	if (c) physcd_autoboot_cancel();
+
 	if (!select_ini && is_menu() && cfg.osd_timeout >= 5)
 	{
 		static int menu_visible = 1;
@@ -7632,13 +7636,18 @@ void HandleUI(void)
 
 		if (!rtc_timer || CheckTimer(rtc_timer))
 		{
-			// physcd autoboot needs the fast tick too: its banner has to
-			// get screen time before fpga_load_rbf disables the osd
-			rtc_timer = GetTimer((cfg.bootcore[0] != '\0' || physcd_autoboot_busy()) ? 100 : 1000);
 			char str[64] = { 0 };
 			char straux[64];
 
+			// tick FIRST, then arm the timer from the resulting state:
+			// sampling busy() beforehand means the pass that starts a
+			// banner has already scheduled the slow 1000ms wake, so the
+			// first banner frame would hold for a second
 			physcd_autoboot_menu_tick();
+
+			// physcd autoboot needs the fast tick too: its banner has to
+			// get screen time before fpga_load_rbf disables the osd
+			rtc_timer = GetTimer((cfg.bootcore[0] != '\0' || physcd_autoboot_busy()) ? 100 : 1000);
 
 			if (cfg.bootcore[0] != '\0')
 			{

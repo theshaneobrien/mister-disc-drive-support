@@ -751,7 +751,7 @@ static int load_bios(const char* filename)
 	return user_io_file_tx(filename, 0xC0);
 }
 
-void psx_mount_cd(int f_index, int s_index, const char *filename)
+int psx_mount_cd(int f_index, int s_index, const char *filename)
 {
 	static char last_dir[1024] = {};
 
@@ -894,6 +894,9 @@ void psx_mount_cd(int f_index, int s_index, const char *filename)
 		unload_chd(&toc);
 		mount_cd(0, s_index);
 	}
+
+	// autoboot needs to know whether a disc actually mounted
+	return loaded;
 }
 
 void psx_poll()

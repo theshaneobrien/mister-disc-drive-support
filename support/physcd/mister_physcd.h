@@ -139,7 +139,15 @@ int physcd_watching(void);
 
 // non-blocking; returns the pending event and clears it. never call
 // any osd function from the watcher - this is the handoff.
-physcd_event_t physcd_poll_event(physcd_disc_t *type, physcd_region_t *region);
+// *initial is 1 when the disc was ALREADY in the drive when watching
+// began, rather than newly inserted - the caller needs that to avoid
+// re-booting the same disc every time the user returns to the menu.
+physcd_event_t physcd_poll_event(physcd_disc_t *type, physcd_region_t *region, int *initial);
+
+// forget the current disc so the next identify re-reads the toc. the
+// watcher calls this on media change; without it a second disc is
+// identified from the first one's toc and cached sectors.
+void physcd_forget_disc(void);
 
 void physcd_close();
 

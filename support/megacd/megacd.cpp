@@ -117,7 +117,7 @@ static int mcd_load_rom(const char *basename, const char *name, int sub_index)
 	return 0;
 }
 
-void mcd_set_image(int num, const char *filename)
+int mcd_set_image(int num, const char *filename)
 {
 	static char last_dir[1024] = {};
 
@@ -228,10 +228,12 @@ void mcd_set_image(int num, const char *filename)
 		if (!loaded) Info("CD BIOS not found!", 4000);
 	}
 
+	int mounted = 0;
 	if (loaded && *filename)
 	{
 		if (cdd.Load(filename) > 0)
 		{
+			mounted = 1;
 			cdd.status = cdd.loaded ? CD_STAT_STOP : CD_STAT_NO_DISC;
 			cdd.latency = 10;
 			cdd.SendData = mcd_send_data;
@@ -259,6 +261,10 @@ void mcd_set_image(int num, const char *filename)
 			cdd.status = CD_STAT_NO_DISC;
 		}
 	}
+
+	// autoboot needs to know whether a disc actually mounted, not just
+	// whether the core type was recognised
+	return mounted;
 }
 
 void mcd_reset() {

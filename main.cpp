@@ -27,6 +27,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <ctype.h>
 #include <string.h>
 #include <signal.h>
+#include <ucontext.h>
 #include "menu.h"
 #include "user_io.h"
 #include "input.h"
@@ -38,14 +39,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 const char *version = "$VER:" VDATE;
 
-// print the fault address to stderr (unbuffered, so it survives) and
-// die with the default action so the shell still reports the signal
+// print the fault address plus pc/lr to stderr (unbuffered, survives)
+// and die with the default action so the shell still reports the
+// signal. pc/lr map to file:line via addr2line on the unstripped elf.
 static void fault_handler(int sig, siginfo_t *si, void *ctx)
 {
-	(void)ctx;
-	char msg[96];
-	int n = snprintf(msg, sizeof(msg), "\n*** %s at address %p ***\n",
-		sig == SIGBUS ? "SIGBUS" : "SIGSEGV", si->si_addr);
+	ucontext_t *uc = (ucontext_t *)ctx;
+	char msg[160];
+	int n = snprintf(msg, sizeof(msg),
+		"\n*** %s: addr=%p pc=0x%08lx lr=0x%08lx ***\n",
+		sig == SIGBUS ? "SIGBUS" : "SIGSEGV", si->si_addr,
+		(unsigned long)uc->uc_mcontext.arm_pc,
+		(unsigned long)uc->uc_mcontext.arm_lr);
 	if (n > 0) write(2, msg, n);
 	signal(sig, SIG_DFL);
 	raise(sig);

@@ -973,11 +973,15 @@ void FileGenerateSavestatePath(const char *name, char* out_name, int sufx)
 		strcat(fname, name);
 	}
 
+	/* a name with no extension (e.g. the physcd path substitutes a
+	   bare game id like "SCES-01565") must append rather than deref
+	   a NULL strrchr result - this crashed main with SIGSEGV at 0 */
 	char *e = strrchr(fname, '.');
 	if (e) e[0] = 0;
+	else e = fname + strlen(fname);
 
 	if(sufx) sprintf(e, "_%d.ss", sufx);
-	else strcat(e, ".ss");
+	else strcpy(e, ".ss");
 }
 
 uint32_t getFileType(const char *name)

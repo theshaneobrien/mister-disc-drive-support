@@ -212,34 +212,19 @@ static int fill_cache(int lba, int count, int sync)
 		sync ? SYNC_TIMEOUT_MS : BG_TIMEOUT_MS);
 	pthread_mutex_unlock(&pcd.io);
 
-	if (r && sync) {
-		/* bounded: give up immediately rather than block the thread
-		   that is also answering the fpga. the prefetcher will come
-		   back to these sectors with retries and the cooked fallback. */
-		pthread_mutex_lock(&pcd.lock);
-		for (int i = 0; i < count; i++) {
-			slot_t *s = slot_for(lba + i);
-			memset(s->data, 0, SLOT_SIZE);
-			s->has_sub = 0;
-			s->bad = 1;
-			s->lba = lba + i;
-			pcd.st_bad++;
-		}
-		pthread_mutex_unlock(&pcd.lock);
-		double dt = now_ms() - io0;
-		if (dt > pcd.st_worst_io_ms) pcd.st_worst_io_ms = dt;
-		return 0;
-	}
-
 	if (r && with_sub && count > 1) {
 		/* the subchannel probe only ever reads ONE sector, and some
 		   usb bridges accept that but reject a multi-sector transfer
-		   with subchannel appended - which would fail every burst and
-		   send us into the retry path forever. re-try the same burst
-		   plain before condemning any sectors, and if that works,
-		   drop subchannel for the rest of the session. */
+		   with subchannel appended - which would fail every burst.
+		   re-try the same burst plain before condemning any sectors,
+		   and if that works, drop subchannel for the rest of the
+		   session. this must run BEFORE the sync bail below: on such
+		   a bridge every sync fill would otherwise fail forever, and
+		   the cost here is one extra attempt exactly once, because
+		   success disables subchannel session-wide. */
 		pthread_mutex_lock(&pcd.io);
-		int r2 = sg_read_cd(lba, count, flags, 0, burst, BG_TIMEOUT_MS);
+		int r2 = sg_read_cd(lba, count, flags, 0, burst,
+			sync ? SYNC_TIMEOUT_MS : BG_TIMEOUT_MS);
 		pthread_mutex_unlock(&pcd.io);
 		if (!r2) {
 			printf("physcd: drive rejects multi-sector subchannel reads, disabling subchannel\n");
@@ -247,6 +232,21 @@ static int fill_cache(int lba, int count, int sync)
 			with_sub = 0;
 			r = 0;
 		}
+	}
+
+	if (r && sync) {
+		/* bounded: give up rather than block the thread that is also
+		   answering the fpga - but do NOT claim these slots. stamping
+		   s->lba on zero-filled slots would make them permanent cache
+		   HITS: the prefetch scan only targets slots whose lba does
+		   not match, so nothing would ever re-read them and one 3s
+		   hiccup would serve zeros for the rest of the mount. leaving
+		   them missing lets the caller serve zeros once while the
+		   prefetch thread fetches them properly, with the retry ladder
+		   and the cooked fallback. */
+		double dt = now_ms() - io0;
+		if (dt > pcd.st_worst_io_ms) pcd.st_worst_io_ms = dt;
+		return -1;
 	}
 
 	if (r) {
@@ -633,23 +633,36 @@ int physcd_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
 	pcd.sync_pending++;
 	int fr = fill_cache(lba, SYNC_BURST, 1);
 	pcd.sync_pending--;
-	if (fr) return -1;
 
-	pthread_mutex_lock(&pcd.lock);
-	s = slot_for(lba);
-	hit = (s->lba == lba);
-	if (hit) {
-		memcpy(dst, s->data, PHYSCD_RAW);
-		if (sub96) memcpy(sub96, s->data + PHYSCD_RAW, PHYSCD_SUB);
-	}
-	pthread_mutex_unlock(&pcd.lock);
-
-	pcd.cursor[w] = lba + 1;
 	pcd.st_miss++;
 	double d = now_ms() - t0;
 	if (d > pcd.st_worst_ms) pcd.st_worst_ms = d;
 
-	return hit ? 0 : -1;
+	if (!fr) {
+		pthread_mutex_lock(&pcd.lock);
+		s = slot_for(lba);
+		hit = (s->lba == lba);
+		if (hit) {
+			memcpy(dst, s->data, PHYSCD_RAW);
+			if (sub96) memcpy(sub96, s->data + PHYSCD_RAW, PHYSCD_SUB);
+		}
+		pthread_mutex_unlock(&pcd.lock);
+
+		if (hit) {
+			pcd.cursor[w] = lba + 1;
+			return 0;
+		}
+	}
+
+	/* couldn't serve it in time: hand back zeros THIS ONCE (never
+	   cached, see fill_cache) so the core gets defined data instead of
+	   a stale buffer, and leave the prefetch cursor pointing here so
+	   the background path re-reads it properly. */
+	memset(dst, 0, PHYSCD_RAW);
+	if (sub96) memset(sub96, 0, PHYSCD_SUB);
+	pcd.st_bad++;
+	pcd.cursor[w] = lba;
+	return 0;
 }
 
 int physcd_read_data2048(int lba, uint8_t *dst)

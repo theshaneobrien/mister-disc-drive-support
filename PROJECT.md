@@ -755,6 +755,40 @@ never read there. the autoboot option must live in `[MiSTer]`.
    otherwise tear down the process with the prefetch thread possibly
    mid-SG_IO, leaving the drive busy for the next process.
 
+#### IMPLEMENTED 2026-07-20 (commits 167b4ef + a8c3744)
+
+built as planned above. adversarial review of the result found 28
+findings (14 distinct after dedup), all fixed in a8c3744. the two that
+would have made the feature unusable:
+
+1. a disc left in the drive re-triggered autoboot on EVERY return to
+   the menu, so the menu was unreachable, and there was no cancel key.
+   fixed with a /tmp/physcd_booted stamp written by phase B plus an
+   "initial" flag on the event (was the disc already in when watching
+   began, or newly inserted?), and any-key cancel mirroring bootcore.
+2. a second disc in one menu session was identified as the FIRST -
+   physcd_identify only loads a toc when first_data_lba < 0, so it
+   reused the previous disc's toc AND its cached sectors. fixed with
+   physcd_forget_disc() on every media change.
+
+and, notably, the "fpga_load_rbf never returns" premise this whole
+two-phase design rests on has ONE EXCEPTION: it returns -1 without
+exec'ing when the rbf cannot be opened (fpga_io.cpp:445-453). that
+left the state machine wedged in AB_LOADING with watching stopped and
+an orphaned marker that would hijack the next manual core load. the
+premise was right enough to design around, but not absolute - worth
+remembering.
+
+rest of the fixes: mount result now propagates (mcd_set_image and
+psx_mount_cd return int) so we only claim success when a disc really
+mounted; watch-start is retried behind a cheap access() probe because
+a usb drive is usually NOT enumerated when main starts, which silently
+killed the feature for the whole session; the watcher handles device
+loss (re-attach only ran while prefetching); saturn/pce/neogeo discs
+no longer boot a core that cannot mount them; banner rows are erased
+on every exit path; phase B mounts from a main-loop timer instead of
+sleep()ing before the loop exists; O_CLOEXEC on the drive fd.
+
 #### phasing and acceptance
 
 - 5b.1 lightweight watch api + event queue, no behaviour change;

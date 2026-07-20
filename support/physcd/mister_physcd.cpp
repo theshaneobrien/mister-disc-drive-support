@@ -78,6 +78,28 @@
 #define PHYSCD_SPEED_NX 4
 
 /*
+ * idle keep-alive.
+ *
+ * once a level is in ram a game can go minutes without touching the
+ * disc, and the prefetcher goes quiet as soon as its window is full.
+ * an idle usb optical drive then spins down - and linux may also
+ * autosuspend the usb device underneath it. waking that back up is
+ * where this drive misbehaves: observed as a multi-minute stall with
+ * the drive audibly spinning down, then back up, and dmesg full of
+ * "reset high-speed USB device" (which is the host trying to recover a
+ * device that did not answer in time). the giveaway was that x-files -
+ * wall-to-wall fmv, i.e. never idle - ran clean for 15 minutes while
+ * sonic cd's time travel and wipeout's race start both stalled: those
+ * are exactly the moments AFTER a quiet spell.
+ *
+ * so keep the drive awake while a disc is mounted by touching it
+ * every so often. one sector, at the current cursor, result discarded
+ * - it also keeps the head near where the next read will want it.
+ * only while mounted: at the menu the drive should be free to sleep.
+ */
+#define KEEPALIVE_MS 15000
+
+/*
  * mixed-mode discs read two streams at once: the core pulls animation
  * or game data from a data track while cdda plays from an audio track
  * thousands of sectors away (sonic cd's intro is the canonical case).
@@ -438,6 +460,7 @@ static void *prefetch_thread(void *arg)
 	int rr = 0;                                /* round-robin start   */
 	double last_stats = now_ms();
 	double last_reattach = 0;
+	double last_io = now_ms();
 
 	while (pcd.running) {
 		int target = -1;
@@ -482,12 +505,31 @@ static void *prefetch_thread(void *arg)
 		}
 
 		if (target < 0) {
+			/* nothing to fetch. if a disc is mounted and the drive has
+			   been untouched for a while, poke it so it does not spin
+			   down / get autosuspended - waking it is what stalls for
+			   minutes. one sector, discarded, near the cursor. */
+			if (pcd.leadout > 0 && now_ms() - last_io >= KEEPALIVE_MS) {
+				uint8_t sc[SLOT_SIZE];
+				int lba = pcd.cursor[0];
+				if (lba < 0 || lba >= pcd.leadout) lba = pcd.first_data_lba;
+				if (lba >= 0 && lba < pcd.leadout && !pcd.sync_pending) {
+					int t = track_of(lba);
+					uint8_t fl = (t >= 0 && pcd.trk[t].audio) ? 0x10 : 0xF8;
+					pthread_mutex_lock(&pcd.io);
+					sg_read_cd(lba, 1, fl, 0, sc, BG_TIMEOUT_MS);
+					pthread_mutex_unlock(&pcd.io);
+					last_io = now_ms();
+				}
+			}
+
 			/* both windows full (or no toc yet): check again soon */
 			struct timespec ts = { 0, 20 * 1000 * 1000 };
 			nanosleep(&ts, NULL);
 			continue;
 		}
 		fill_cache(target, BURST, 0);
+		last_io = now_ms();
 	}
 	return NULL;
 }

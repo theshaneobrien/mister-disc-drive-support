@@ -229,8 +229,12 @@ int physcd_menu_row(char *out, int outsz)
 		char rbf[1024];
 		if (core && find_core_rbf(core, rbf, sizeof(rbf)))
 		{
-			if (label[0]) snprintf(out, outsz, "Play: %s - %s", label, physcd_console_name(t));
-			else          snprintf(out, outsz, "Play %s Disc", physcd_console_name(t));
+			/* a real title only if there is a non-blank one - a
+			   whitespace-only label must not render "Play:  - Mega CD" */
+			const char *title = label;
+			while (*title == ' ') title++;
+			if (*title) snprintf(out, outsz, "Play: %s - %s", title, physcd_console_name(t));
+			else        snprintf(out, outsz, "Play %s Disc", physcd_console_name(t));
 			return 1;
 		}
 	}

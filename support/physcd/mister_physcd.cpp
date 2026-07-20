@@ -56,6 +56,28 @@
 #define BG_TIMEOUT_MS 3000
 
 /*
+ * drive speed cap.
+ *
+ * the real requirement is 172 KB/s sustained (1x raw cdda), and about
+ * 353 KB/s for the worst realistic case - a data stream and cdda
+ * together, or psx's 2x mode. asking the drive for MAXIMUM speed buys
+ * nothing above that and costs reliability: a dvd writer will spin a
+ * cd as fast as it can, tracking errors scale with rpm on a warped,
+ * dirty or 30-year-old disc, and the outer edge - where rot starts and
+ * where it spins fastest - is precisely where our own discs read worst
+ * (cdrdao stalled for a minute per minute of audio out there). it also
+ * runs hotter and louder, and this drive class has already wedged into
+ * a no-media state twice under sustained load; our prefetcher works a
+ * drive far harder than a real console ever did, holding it open and
+ * pulling 96 sectors ahead of both streams for a whole session.
+ *
+ * 4x leaves ~2x headroom over the worst case. note the measured rates
+ * at "maximum" were only 741-1072 KB/s (~4-6x, CAV), so this mostly
+ * reins in the outer edge and costs nothing at the inner one.
+ */
+#define PHYSCD_SPEED_NX 4
+
+/*
  * mixed-mode discs read two streams at once: the core pulls animation
  * or game data from a data track while cdda plays from an audio track
  * thousands of sectors away (sonic cd's intro is the canonical case).
@@ -126,6 +148,19 @@ static double now_ms()
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+/* linux turns Nx into kB/s (N*177) for GPCMD_SET_SPEED; 0 would mean
+   maximum. plenty of drives ignore the command entirely - best effort,
+   and re-applied per disc because a media change resets it on many. */
+static void set_speed_cap()
+{
+	if (pcd.fd < 0) return;
+	if (ioctl(pcd.fd, CDROM_SELECT_SPEED, PHYSCD_SPEED_NX) < 0)
+		printf("physcd: speed cap not supported, drive keeps its default\n");
+	else
+		printf("physcd: speed capped at %dx (~%d KB/s, need 172)\n",
+			PHYSCD_SPEED_NX, PHYSCD_SPEED_NX * 177);
 }
 
 // ---------------------------------------------------------------- reads
@@ -461,8 +496,7 @@ int physcd_open(const char *dev)
 	if (!pcd.cache) { close(pcd.fd); pcd.fd = -1; return -1; }
 	for (int i = 0; i < CACHE_SECTORS; i++) pcd.cache[i].lba = -1;
 
-	/* best effort: spin the drive at full speed for prefetch headroom */
-	ioctl(pcd.fd, CDROM_SELECT_SPEED, 0);
+	set_speed_cap();
 
 	pcd.leadout = 0;
 	pcd.ntrk = 0;
@@ -583,6 +617,8 @@ int physcd_load_toc(toc_t *toc)
 	pthread_mutex_lock(&pcd.lock);
 	for (int i = 0; i < CACHE_SECTORS; i++) pcd.cache[i].lba = -1;
 	pthread_mutex_unlock(&pcd.lock);
+
+	set_speed_cap();      /* a media change resets it on many drives */
 
 	pcd.sub_ok = -1;
 	probe_subchannel(toc->tracks[0].start + 16);

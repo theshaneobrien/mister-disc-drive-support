@@ -5395,7 +5395,7 @@ void HandleUI(void)
 
 		if (menu)
 		{
-			if (flist_nDirEntries() && flist_SelectedItem()->de.d_type != DT_DIR)
+			if (flist_nDirEntries() && flist_SelectedItem()->de.d_type != DT_DIR && !physcd_is_menu_row(flist_SelectedItem()->de.d_name))
 			{
 				SelectedDir[0] = 0;
 				if (strlen(selPath))
@@ -7656,11 +7656,29 @@ void HandleUI(void)
 
 			// a disc went in or out while sitting on the core browser:
 			// rebuild the list so the Play Disc row appears/disappears
-			// without the user having to navigate away and back
-			if (physcd_menu_dirty() && menustate == MENU_FILE_SELECT2 && (fs_Options & SCANO_CORES))
+			// without the user having to navigate away and back.
+			// - state/ext guards come BEFORE physcd_menu_dirty() so its
+			//   edge is consumed only when we can act on it (else an edge
+			//   arriving in another state is lost and the row never updates)
+			// - RBF gate keeps this off the multiboot .txt sub-browser
+			// - skip while autoboot is drawing its banner (rows 12-15),
+			//   the rebuild's PrintDirectory would wipe it for a frame
+			if (menustate == MENU_FILE_SELECT2 && (fs_Options & SCANO_CORES)
+				&& strcasestr(fs_pFileExt, "RBF") && !physcd_autoboot_busy()
+				&& physcd_menu_dirty())
 			{
-				ScanDirectory(selPath, SCANF_INIT, fs_pFileExt, fs_Options);
-				menustate = MENU_FILE_SELECT1;
+				// only rebuild when the ROW presence actually toggles, so
+				// an audio/unknown disc or a plain eject (no row either way)
+				// does not bounce the cursor for no visible change
+				static int row_shown = 0;
+				char probe[256];
+				int now = physcd_menu_row(probe, sizeof(probe));
+				if (now != row_shown)
+				{
+					row_shown = now;
+					ScanDirectory(selPath, SCANF_INIT, fs_pFileExt, fs_Options, NULL, filter[0] ? filter : NULL);
+					menustate = MENU_FILE_SELECT1;
+				}
 			}
 
 			// physcd autoboot needs the fast tick too: its banner has to

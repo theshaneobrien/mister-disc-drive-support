@@ -214,6 +214,14 @@ int physcd_menu_row(char *out, int outsz)
 	if (!physcd_menu_status(label, sizeof(label), &t)) return 0;
 	if (!mountable(t)) return 0;   /* only offer discs we can boot+mount */
 
+	/* and only when the matching core is actually installed - showing a
+	   row that then silently fails to load (the browser cannot even draw
+	   an Info popup, its menustate is above MENU_INFO) is worse than no
+	   row. this makes selecting the row effectively always succeed. */
+	const char *core = core_name_for(t);
+	char rbf[1024];
+	if (!core || !find_core_rbf(core, rbf, sizeof(rbf))) return 0;
+
 	if (label[0]) snprintf(out, outsz, "Play Disc: %s", label);
 	else          snprintf(out, outsz, "Play %s Disc", physcd_disc_name(t));
 	return 1;

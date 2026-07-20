@@ -1793,16 +1793,20 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 		}
 
 		printf("Got %d dir entries\n", flist_nDirEntries());
-		if (!flist_nDirEntries()) return 0;
 
 		std::sort(DirItem.begin(), DirItem.end(), DirentComp());
 
 		/* physcd: pin a "Play Disc" row at the top of the menu core list
 		   when a physical disc is in the drive, so it is a normal cursor
 		   target - A on it plays the disc, A on a core loads the core,
-		   no button conflict. after the sort so it stays on top; before
-		   the reselect so the remembered-core index stays correct. */
-		if (options & SCANO_CORES)
+		   no button conflict.
+		   - keyed on the RBF extension, not the SCANO_CORES bit alone:
+		     that bit is also set for the multiboot .txt sub-browser
+		     (fs_pFileExt "TXT"), where a Play Disc row must NOT appear.
+		   - inserted after the sort so it stays on top, and BEFORE the
+		     empty-list early return below so the row still shows when a
+		     filter matches no cores. */
+		if ((options & SCANO_CORES) && extension && strcasestr(extension, "RBF"))
 		{
 			char row[256];
 			if (physcd_menu_row(row, sizeof(row)))
@@ -1815,6 +1819,8 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 				DirItem.insert(DirItem.begin(), d);
 			}
 		}
+
+		if (!flist_nDirEntries()) return 0;
 
 		if (file_name[0])
 		{

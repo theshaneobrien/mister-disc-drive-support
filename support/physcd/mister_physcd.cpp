@@ -522,8 +522,11 @@ static void *prefetch_thread(void *arg)
 						pthread_mutex_lock(&pcd.lock);
 						snprintf(pcd.watch_label, sizeof(pcd.watch_label), "%s", lbl);
 						pcd.watch_type = (int)t;
-						if (!pcd.watch_present) pcd.watch_dirty = 1;
 						pcd.watch_present = 1;
+						/* this branch only runs on a real change - a fresh
+						   disc OR a swap (media changed) - so always flag
+						   dirty, or a swap keeps the old row label */
+						pcd.watch_dirty = 1;
 						pthread_mutex_unlock(&pcd.lock);
 
 						pcd.ev_type = (int)t;
@@ -1126,6 +1129,16 @@ void physcd_watch_stop(void)
 {
 	pcd.watch_mode = 0;
 	pcd.ev = (int)PHYSCD_EV_NONE;
+
+	/* clear the cached snapshot so a stop/restart that straddles a disc
+	   removal cannot leave watch_present stale at 1 */
+	pthread_mutex_lock(&pcd.lock);
+	pcd.watch_present = 0;
+	pcd.watch_type = 0;
+	pcd.watch_label[0] = 0;
+	pcd.watch_dirty = 1;
+	pthread_mutex_unlock(&pcd.lock);
+
 	physcd_close();
 }
 
@@ -1154,11 +1167,14 @@ int physcd_menu_status(char *name, int namesz, physcd_disc_t *type)
 }
 
 /* edge-triggered: 1 once after the disc presence changed, so the menu
-   can rebuild the core list to add/remove the Play Disc row. */
+   can rebuild the core list to add/remove the Play Disc row. locked so
+   an edge the watcher sets between our read and clear is not lost. */
 int physcd_menu_dirty(void)
 {
+	pthread_mutex_lock(&pcd.lock);
 	int d = pcd.watch_dirty;
 	pcd.watch_dirty = 0;
+	pthread_mutex_unlock(&pcd.lock);
 	return d;
 }
 

@@ -20,6 +20,7 @@
 #include "../psx/psx.h"
 #include "../saturn/saturn.h"
 #include "../neogeo/neogeocd.h"
+#include "../3do/3do.h"
 #include "mister_physcd.h"
 #include "physcd_autoboot.h"
 
@@ -45,6 +46,7 @@ static const char *core_name_for(physcd_disc_t t)
 	case PHYSCD_DISC_SATURN: return "Saturn";
 	case PHYSCD_DISC_PCECD:  return "TurboGrafx16";
 	case PHYSCD_DISC_NEOGEO: return "NeoGeo";
+	case PHYSCD_DISC_3DO:    return "3DO";
 	default:                 return NULL;
 	}
 }
@@ -60,6 +62,7 @@ static int core_matches(physcd_disc_t t)
 	// is_neogeo(), NOT is_neogeo_cd(): a freshly loaded NeoGeo core is
 	// in cart mode; the mount enables cd mode
 	case PHYSCD_DISC_NEOGEO: return is_neogeo();
+	case PHYSCD_DISC_3DO:    return is_3do();
 	default:                 return 0;
 	}
 }
@@ -70,7 +73,8 @@ static int core_matches(physcd_disc_t t)
 static int mountable(physcd_disc_t t)
 {
 	return t == PHYSCD_DISC_MEGACD || t == PHYSCD_DISC_PSX
-		|| t == PHYSCD_DISC_SATURN || t == PHYSCD_DISC_NEOGEO;
+		|| t == PHYSCD_DISC_SATURN || t == PHYSCD_DISC_NEOGEO
+		|| t == PHYSCD_DISC_3DO;
 }
 
 int physcd_mount_current_core(void)
@@ -91,6 +95,8 @@ int physcd_mount_current_core(void)
 		neocd_set_en(1);
 		return neocd_set_image(PHYSCD_SENTINEL);
 	}
+
+	if (is_3do()) return p3do_set_image(0, PHYSCD_SENTINEL);
 
 	printf("physcd: core '%s' has no physical disc support yet\n", user_io_get_core_name());
 	return 0;

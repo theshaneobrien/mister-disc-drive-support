@@ -6,6 +6,7 @@
 
 #include "3do.h"
 #include "../chd/mister_chd.h"
+#include "../physcd/mister_physcd.h"
 
 p3docdd_t p3docdd;
 
@@ -317,7 +318,18 @@ int p3docdd_t::Load(const char *filename)
 	Unload();
 
 	const char *ext = filename + strlen(filename) - 4;
-	if (!strncasecmp(".cue", ext, 4))
+	if (!strcmp(filename, PHYSCD_SENTINEL))
+	{
+		if (physcd_open(NULL) || physcd_load_toc(&this->toc))
+		{
+			physcd_close();
+			printf("\x1b[32m3DO: no readable physical disc\n\x1b[0m");
+			return (-1);
+		}
+		/* raw drive reads always deliver 2352-byte sectors */
+		this->sectorSize = 2352;
+	}
+	else if (!strncasecmp(".cue", ext, 4))
 	{
 		if (LoadCUE(filename)) {
 			return (-1);
@@ -393,6 +405,11 @@ void p3docdd_t::Unload()
 {
 	if (this->loaded)
 	{
+		if (this->toc.phys)
+		{
+			physcd_close();
+		}
+
 		if (this->toc.chd_f)
 		{
 			chd_close(this->toc.chd_f);
@@ -494,6 +511,9 @@ void p3docdd_t::CommandExec() {
 
 	case P3DO_COMM_READ:
 		this->lba = cmd_lba - 150;
+
+		/* start the prefetch now, during the modeled read latency */
+		if (this->toc.phys) physcd_seek_hint(this->lba);
 
 		this->track = this->toc.GetTrackByLBA(this->lba);
 
@@ -679,7 +699,13 @@ void p3docdd_t::ReadData(uint8_t *buf)
 	if (this->toc.tracks[this->track].type == TT_MODE1)
 	{
 		int lba_ = this->lba >= 0 ? this->lba : 0;
-		if (this->toc.chd_f)
+		if (this->toc.phys)
+		{
+			/* raw 2352 sector straight into buf, same as the 2352 file
+			   path below */
+			physcd_read_sector(lba_, buf, NULL);
+		}
+		else if (this->toc.chd_f)
 		{
 			int read_offset = 0;
 			if (this->sectorSize == 2048)

@@ -971,6 +971,11 @@ physcd_disc_t physcd_identify()
 	if (!physcd_read_sector(base, raw, NULL)) {
 		if (!memcmp(raw + 16, "SEGADISCSYSTEM", 14)) return PHYSCD_DISC_MEGACD;
 		if (!memcmp(raw + 16, "SEGA SEGASATURN", 15)) return PHYSCD_DISC_SATURN;
+		/* 3do volume header: record type 0x01 then five 0x5A sync bytes.
+		   not iso9660, so this is the only marker. */
+		if (raw[16] == 0x01 && raw[17] == 0x5A && raw[18] == 0x5A
+			&& raw[19] == 0x5A && raw[20] == 0x5A && raw[21] == 0x5A)
+			return PHYSCD_DISC_3DO;
 	}
 
 	if (!physcd_read_sector(base + 16, raw, NULL)) {
@@ -1178,6 +1183,7 @@ const char *physcd_console_name(physcd_disc_t t)
 	case PHYSCD_DISC_PSX:    return "PlayStation";
 	case PHYSCD_DISC_PCECD:  return "TurboGrafx-CD";
 	case PHYSCD_DISC_NEOGEO: return "Neo Geo CD";
+	case PHYSCD_DISC_3DO:    return "3DO";
 	default:                 return physcd_disc_name(t);
 	}
 }
@@ -1190,6 +1196,7 @@ const char *physcd_disc_name(physcd_disc_t t)
 	case PHYSCD_DISC_PSX:    return "PSX";
 	case PHYSCD_DISC_PCECD:  return "TurboGrafx CD";
 	case PHYSCD_DISC_NEOGEO: return "NeoGeo CD";
+	case PHYSCD_DISC_3DO:    return "3DO";
 	case PHYSCD_DISC_AUDIO:  return "Audio CD";
 	case PHYSCD_DISC_NONE:   return "No Disc";
 	default:                 return "Unknown";

@@ -251,6 +251,10 @@ int cdd_t::Load(const char *filename)
 	{
 		if (physcd_open(NULL) || physcd_load_toc(&this->toc))
 		{
+			/* close on failure: toc.phys is never set, so Unload
+			   would not release the fd, the prefetch thread or the
+			   9.5MB cache */
+			physcd_close();
 			printf("\x1b[32mMCD: no readable physical disc\n\x1b[0m");
 			return (-1);
 		}
@@ -1050,8 +1054,11 @@ int cdd_t::ReadSubcode(uint16_t* buf)
 	if (this->toc.phys)
 	{
 		uint8_t rawsec[2352];
-		if (!physcd_sub_supported() ||
-		    physcd_read_sector(this->chd_audio_read_lba, rawsec, subc))
+		/* per-SECTOR check: sectors recovered by the single-sector
+		   retry or the cooked fallback carry no subchannel even on a
+		   drive that supports it, and sending those zeros on would be
+		   fabricated subcode rather than an honest "no sub" */
+		if (!physcd_read_sector_sub(this->chd_audio_read_lba, rawsec, subc))
 		{
 			err = -1;	/* same as the "no sub file" path */
 		}

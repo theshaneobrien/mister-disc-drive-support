@@ -133,7 +133,14 @@ void mcd_set_image(int num, const char *filename)
 	   drive, so open it early here to read the disc's region. a pal
 	   disc booted on a us bios plays but runs at the wrong timing and
 	   stutters, which is not obvious to diagnose from the symptom. */
-	if (phys && !physcd_open(NULL)) disc_region = physcd_region();
+	if (phys && !physcd_open(NULL))
+	{
+		disc_region = physcd_region();
+		/* nothing readable in the drive: release it now rather than
+		   leave the fd, prefetch thread and cache alive if the mount
+		   below never gets as far as cdd.Load */
+		if (!physcd_disc_present()) physcd_close();
+	}
 
 	int same_game = *filename && *last_dir && !strncmp(last_dir, filename, strlen(last_dir));
 

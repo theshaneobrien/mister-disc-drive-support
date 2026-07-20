@@ -66,6 +66,13 @@ int physcd_sub_supported();
 // 0 on success.
 int physcd_read_sector(int lba, uint8_t *dst, uint8_t *sub96);
 
+// as above, but returns 1 only when sub96 received REAL subchannel
+// data. sectors recovered by the single-sector retry or the cooked
+// fallback carry none, so a per-disc physcd_sub_supported() check is
+// not enough - a caller that treats zeros as valid subcode would feed
+// the core fabricated data. returns 0 on failure or when absent.
+int physcd_read_sector_sub(int lba, uint8_t *dst, uint8_t *sub96);
+
 // convenience: read only the 2048 user bytes of a mode1/mode2 data
 // sector (what cdd ReadData() wants). handles the 16/24 byte header
 // skip based on the mode byte. 0 on success.

@@ -349,7 +349,14 @@ static int load_phys(toc_t *table)
 	else if (table->phys) unload_phys(table);
 	else unload_cue(table);
 
-	if (physcd_open(NULL) || physcd_load_toc(table) || !table->last) return 0;
+	if (physcd_open(NULL) || physcd_load_toc(table) || !table->last)
+	{
+		/* close on failure: table->phys is not set on this path, so
+		   the unmount path would leave the fd, the prefetch thread
+		   and the 9.5MB cache alive with nothing mounted */
+		physcd_close();
+		return 0;
+	}
 
 	/* physcd reports drive-absolute lbas with EXCLUSIVE ends (what
 	 * megacd wants). psx wants inclusive ends and the same faked

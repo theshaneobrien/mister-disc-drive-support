@@ -555,6 +555,15 @@ int physcd_load_toc(toc_t *toc)
 		}
 	}
 
+	/* cdth_trk0/trk1 come straight from the drive: a blank, unfinalized
+	   or flaky-bridge answer with trk0 > trk1 skips the loop entirely,
+	   and tracks[n-1] would then write ~450 bytes BEFORE the caller's
+	   toc_t (and pcd.trk[-1].end aliases first_data_lba). */
+	if (n < 1) {
+		printf("physcd: drive reported no tracks (%d-%d)\n", hdr.cdth_trk0, hdr.cdth_trk1);
+		return -1;
+	}
+
 	struct cdrom_tocentry lead;
 	memset(&lead, 0, sizeof(lead));
 	lead.cdte_track = CDROM_LEADOUT;
@@ -605,9 +614,20 @@ void physcd_seek_hint(int lba)
 	pcd.wactive[w] = 1;
 }
 
-int physcd_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
+/* shared implementation; sub_valid (optional) reports whether sub96
+   actually received subchannel data rather than zeros */
+static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid)
 {
-	if (pcd.fd < 0 || lba < 0 || lba >= pcd.leadout) return -1;
+	if (sub_valid) *sub_valid = 0;
+
+	if (pcd.fd < 0 || lba < 0 || lba >= pcd.leadout) {
+		/* always leave dst defined: megacd's ReadCDDA ignores the
+		   return value and would otherwise ship an uninitialized
+		   stack buffer to the fpga */
+		memset(dst, 0, PHYSCD_RAW);
+		if (sub96) memset(sub96, 0, PHYSCD_SUB);
+		return -1;
+	}
 
 	int w = win_of(lba);
 	pcd.wactive[w] = 1;
@@ -618,6 +638,7 @@ int physcd_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
 	if (hit) {
 		memcpy(dst, s->data, PHYSCD_RAW);
 		if (sub96) memcpy(sub96, s->data + PHYSCD_RAW, PHYSCD_SUB);
+		if (sub_valid) *sub_valid = s->has_sub;
 	}
 	pthread_mutex_unlock(&pcd.lock);
 
@@ -645,6 +666,7 @@ int physcd_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
 		if (hit) {
 			memcpy(dst, s->data, PHYSCD_RAW);
 			if (sub96) memcpy(sub96, s->data + PHYSCD_RAW, PHYSCD_SUB);
+			if (sub_valid) *sub_valid = s->has_sub;
 		}
 		pthread_mutex_unlock(&pcd.lock);
 
@@ -663,6 +685,18 @@ int physcd_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
 	pcd.st_bad++;
 	pcd.cursor[w] = lba;
 	return 0;
+}
+
+int physcd_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
+{
+	return read_sector_impl(lba, dst, sub96, NULL);
+}
+
+int physcd_read_sector_sub(int lba, uint8_t *dst, uint8_t *sub96)
+{
+	int valid = 0;
+	if (read_sector_impl(lba, dst, sub96, &valid)) return 0;
+	return valid;
 }
 
 int physcd_read_data2048(int lba, uint8_t *dst)

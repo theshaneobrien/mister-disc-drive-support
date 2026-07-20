@@ -480,6 +480,57 @@ small c daemon (reuse probe code) started from user-startup:
 
 acceptance: insert mega cd disc from the main menu, game boots hands-free.
 
+#### 2026-07-20: extended play - stalls are IDLE-WAKE, not seek current
+
+x-files (psx, all fmv): 15 minutes clean, no hitches. wipeout 2097
+froze ~20s into a race, recovered by itself, then played fine. sonic cd
+stalled at the same time-travel white screen, drive audibly spun DOWN,
+minutes of nothing, spun back up, resumed.
+
+stats during the sonic cd session:
+  hit 143 miss 1  hitrate 99.3%  worst miss 102ms
+  BAD 0 sectors served as zeros  worst drive io 289ms
+so the cache is healthy and NO sector was ever served as zeros - the
+read path is not the fault. dmesg shows the real event: repeated
+"reset high-speed USB device", plus one full disconnect that brought
+the drive back as a new device number (that is what moved it sr0 ->
+sr1 mid-session).
+
+my first reading was power brownout under seek load. the user's
+counter-argument is better and fits the evidence: x-files reads
+CONTINUOUSLY and never drops, so sustained draw is the safest case,
+not the worst. every stall follows a QUIET spell - a level sitting in
+ram, no disc access - and our prefetcher goes silent as soon as its
+window is full. an idle usb optical drive spins down, and linux may
+autosuspend the usb device underneath it; waking that is what costs
+minutes, and the "reset high-speed USB device" lines are the host
+trying to recover a device that did not answer in time - a
+CONSEQUENCE of the sleep, not an independent power fault.
+
+two fixes, independent, both shipped:
+1. commit 5dbc855 - survive the re-enumeration. our fd was stale
+   FOREVER after a disconnect, so every read would have failed with no
+   recovery short of a remount. the prefetch thread now counts
+   consecutive unreadable bursts, probes for ENODEV/ENXIO/EIO after 8,
+   rescans /dev/sr0-7 and re-opens wherever the drive reappeared
+   (rate-limited 5s). stats gained REATTACH + current device, which
+   separates a bus problem from bad media at a glance.
+2. idle keep-alive (KEEPALIVE_MS 15000): while a disc is MOUNTED and
+   the prefetcher has been quiet for 15s, read one sector at the
+   cursor and discard it. keeps the drive spun up, keeps the head
+   near the next read, and incidentally defeats usb autosuspend since
+   activity resets that timer too. deliberately NOT done at the menu -
+   an idle drive there should be free to sleep.
+3. tools/usb_nosleep.sh - pins the drive's usb device and its parent
+   hub port to power/control=on, and prints autosuspend_delay_ms. run
+   it standalone as the DIAGNOSTIC (does it report auto?) or add it to
+   user-startup.sh as the config-level fix.
+
+note the hardware is not the variable it looked like: the drive is a
+slimline usb writer with a hard-attached short cable on a POWERED hub
+already, and it is essentially the only model still sold. so a
+software-side answer was needed rather than "buy a better drive".
+
 ### phase 5b: autoboot from the menu (PLANNED 2026-07-20, do before phase 6)
 
 goal: mister sitting at the menu, disc goes in (or is already there at

@@ -531,6 +531,29 @@ slimline usb writer with a hard-attached short cable on a POWERED hub
 already, and it is essentially the only model still sold. so a
 software-side answer was needed rather than "buy a better drive".
 
+#### 2026-07-20 (later): the bluetooth controller proves it is POWER
+
+next session, mid-stall, the BLUETOOTH CONTROLLER on the same hub also
+stopped responding - and started working again the instant the drive
+spun back up. our software touches /dev/srN and nothing else; it
+cannot stall a bt dongle. two unrelated devices on one hub failing and
+recovering together is a shared-supply (or shared host-controller)
+event, not anything the backend can cause or cure. the de10-nano has
+a single dwc2 host controller with everything behind one hub, so a
+sag or an error-recovery stall takes the whole tree down.
+
+so: idle-wake made things much better but the residual stalls are
+electrical. the useful mitigations are physical, and separating the
+POWER DOMAINS matters more than raw psu amps - inrush is local, so
+the fix is to stop the drive's spin-up transient sharing a rail with
+anything you care about:
+  - drive on its own powered hub, bt and input devices elsewhere
+  - or bt moved to the de10-nano's own usb port
+  - beefier 5v supply for whichever hub keeps the drive
+what the software now does is degrade gracefully instead of dying: the
+game kept running, audio and input resumed on their own, and the
+re-attach path is there if the drive ever comes back renumbered.
+
 ### phase 5b: autoboot from the menu (PLANNED 2026-07-20, do before phase 6)
 
 goal: mister sitting at the menu, disc goes in (or is already there at

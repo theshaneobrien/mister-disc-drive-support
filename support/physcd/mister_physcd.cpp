@@ -1062,43 +1062,6 @@ const char *physcd_region_name(physcd_region_t r)
 }
 
 /*
- * saturn region from the "SEGA SEGASATURN" ip.bin header. the
- * compatible area symbols sit at offset 0x40, up to 10 chars:
- *   J Japan, T Asia-NTSC, K Korea      -> NTSC-J
- *   U USA/Canada, B Brazil             -> NTSC-U
- *   E Europe, A Asia-PAL, L Latam-PAL  -> PAL
- * a disc can list several. prefer US then EU then JP for a multi
- * region disc (matches the megacd precedence); single region discs
- * resolve cleanly.
- */
-physcd_region_t physcd_saturn_region()
-{
-	uint8_t user[2048];
-
-	if (!physcd_disc_present()) return PHYSCD_REGION_UNKNOWN;
-	if (pcd.first_data_lba < 0) {
-		toc_t tmp;
-		if (physcd_load_toc(&tmp)) return PHYSCD_REGION_UNKNOWN;
-		if (pcd.first_data_lba < 0) return PHYSCD_REGION_UNKNOWN;
-	}
-
-	if (physcd_read_data2048(pcd.first_data_lba, user)) return PHYSCD_REGION_UNKNOWN;
-	if (memcmp(user, "SEGA SEGASATURN", 15)) return PHYSCD_REGION_UNKNOWN;
-
-	int j = 0, u = 0, e = 0;
-	for (int i = 0x40; i < 0x50; i++) {
-		char c = user[i];
-		if (c == 'J' || c == 'T' || c == 'K') j = 1;
-		else if (c == 'U' || c == 'B') u = 1;
-		else if (c == 'E' || c == 'A' || c == 'L') e = 1;
-	}
-	if (u) return PHYSCD_REGION_US;
-	if (e) return PHYSCD_REGION_EU;
-	if (j) return PHYSCD_REGION_JP;
-	return PHYSCD_REGION_UNKNOWN;
-}
-
-/*
  * a human-readable name for the menu. the iso9660 volume label is the
  * one name field present on every data disc regardless of console -
  * "SONIC_CD", "FF8_DISK1" etc - so use that. d-characters forbid

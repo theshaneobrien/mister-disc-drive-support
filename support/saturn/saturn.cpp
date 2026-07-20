@@ -163,16 +163,6 @@ int saturn_set_image(int num, const char *filename)
 	int reset_after_insert_disc = !user_io_status_get("[4]");
 	int phys = !strcmp(filename, PHYSCD_SENTINEL);
 	int mounted = 0;
-	physcd_region_t disc_region = PHYSCD_REGION_UNKNOWN;
-
-	/* the bios is chosen below, before satcdd.Load opens the drive, so
-	   open it early here to read the disc's region. a PAL disc on an
-	   NTSC bios region locks (Die Hard Trilogy), so this matters. */
-	if (phys && !physcd_open(NULL))
-	{
-		disc_region = physcd_saturn_region();
-		if (!physcd_disc_present()) physcd_close();
-	}
 
 	satcdd.Unload();
 	satcdd.Reset();
@@ -196,28 +186,12 @@ int saturn_set_image(int num, const char *filename)
 		user_io_status_set("[0]", 1);
 		saturn_reset();
 
-		// load CD BIOS
+		// load CD BIOS. NOTE saturn region is NOT bios-based: the core
+		// has one boot.rom and its own region option (set it to Auto in
+		// the core OSD and it reads the region off the disc). so there
+		// is deliberately no per-region bios matching here, unlike psx.
 		int bios_loaded = 0;
-		if (phys)
-		{
-			// no game folder on a physical disc: match the bios to the
-			// disc region (boot_EU/US/JP.rom, or bios_XX.rom), else boot.rom
-			const char *rn = physcd_region_name(disc_region);
-			if (*rn)
-			{
-				sprintf(buf, "%s/boot_%s.rom", HomeDir(), rn);
-				bios_loaded = user_io_file_tx(buf);
-				if (!bios_loaded)
-				{
-					sprintf(buf, "%s/bios_%s.rom", HomeDir(), rn);
-					bios_loaded = user_io_file_tx(buf);
-				}
-			}
-			printf("\x1b[32mSaturn: physical disc region %s%s\n\x1b[0m",
-				*rn ? rn : "unknown",
-				bios_loaded ? ", loaded matching BIOS" : ", falling back to boot.rom");
-		}
-		else // per-game bios lives next to the image
+		if (!phys) // per-game bios lives next to the image, no folder for a physical disc
 		{
 			bios_loaded = saturn_load_rom(filename, "cd_bios.rom", 0)    // from disk folder
 				|| saturn_load_rom(last_dir, "cd_bios.rom", 0);         // from parent folder

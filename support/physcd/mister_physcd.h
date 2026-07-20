@@ -112,9 +112,6 @@ typedef enum {
 // mega drive style header the disc mirrors in its first data sector.
 physcd_region_t physcd_region();
 
-// region of a saturn disc from its "SEGA SEGASATURN" ip.bin header
-physcd_region_t physcd_saturn_region();
-
 // parse a mega drive style header block (>= 0x1F3 bytes, "SEGA" at
 // 0x100, region field at 0x1F0). exposed because mega cd BIOS roms
 // carry the same header, so callers can cross-check disc against bios.

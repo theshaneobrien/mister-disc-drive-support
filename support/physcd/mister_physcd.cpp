@@ -121,9 +121,11 @@ static struct {
 	uint32_t st_bad_logged;
 	double st_worst_ms;           /* worst consumer-visible miss    */
 	double st_worst_io_ms;        /* worst drive transaction        */
+	volatile int consec_fail;     /* consecutive unreadable bursts  */
+	uint32_t st_reattach;         /* times the drive came back      */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0 };
 
 static int track_of(int lba)
 {
@@ -131,6 +133,9 @@ static int track_of(int lba)
 		if (lba < pcd.trk[i].end) return i;
 	return pcd.ntrk ? pcd.ntrk - 1 : -1;
 }
+
+static char pref_dev[64] = "";       /* "" = autodetect */
+static char cur_dev[64] = "";        /* what we actually opened */
 
 static inline int win_of(int lba)
 {
@@ -300,6 +305,9 @@ static int fill_cache(int lba, int count, int sync)
 				rr = cooked_read_raw(lba + i, one);
 				pthread_mutex_unlock(&pcd.io);
 			}
+			/* feeds the re-attach probe: a drive that has dropped off
+			   the bus fails every sector, a scratch fails a few */
+			if (rr) pcd.consec_fail++; else pcd.consec_fail = 0;
 			pthread_mutex_lock(&pcd.lock);
 			slot_t *s = slot_for(lba + i);
 			if (!rr) {
@@ -336,6 +344,8 @@ static int fill_cache(int lba, int count, int sync)
 	double d = now_ms() - io0;
 	if (d > pcd.st_worst_io_ms) pcd.st_worst_io_ms = d;
 
+	pcd.consec_fail = 0;          /* a clean burst: the drive is there */
+
 	int sector_len = PHYSCD_RAW + (with_sub ? PHYSCD_SUB : 0);
 	pthread_mutex_lock(&pcd.lock);
 	for (int i = 0; i < count; i++) {
@@ -364,6 +374,9 @@ static void stats_report()
 		   hits. nonzero here means the disc, not the cache. */
 		fprintf(f, "BAD %u sectors served as zeros  worst drive io %.0f ms\n",
 			pcd.st_bad, pcd.st_worst_io_ms);
+		/* nonzero REATTACH means the drive dropped off the usb bus and
+		   was recovered - that is a power/cabling problem, not media */
+		fprintf(f, "REATTACH %u  (device %s)\n", pcd.st_reattach, cur_dev);
 		fprintf(f, "data  window: active %d cursor %d\n", pcd.wactive[0], pcd.cursor[0]);
 		fprintf(f, "cdda  window: active %d cursor %d\n", pcd.wactive[1], pcd.cursor[1]);
 		fclose(f);
@@ -375,11 +388,56 @@ static void stats_report()
 	   you want when hunting an intermittent read problem */
 }
 
+static int open_drive(char *out, int outsz);   /* defined below */
+extern char cur_dev[];
+
+/*
+ * a usb drive can vanish mid-session and come back as a DIFFERENT
+ * /dev/srN. observed on real hardware: heavy seeking (a level load)
+ * draws peak current, the port browns out, and dmesg shows
+ * "reset high-speed USB device" - sometimes a full disconnect and a
+ * new device number, which is exactly how the drive moved sr0 -> sr1.
+ * our fd is then stale FOREVER and every read fails, so the game gets
+ * zeros with no way back short of a remount. rescan and re-open.
+ *
+ * prefetch thread only (it blocks), rate-limited, and the io mutex is
+ * held so no read can be in flight across the swap.
+ */
+static int device_gone(void)
+{
+	if (pcd.fd < 0) return 1;
+	if (ioctl(pcd.fd, CDROM_DRIVE_STATUS, CDSL_CURRENT) >= 0) return 0;
+	return (errno == ENODEV || errno == ENXIO || errno == EIO || errno == ESHUTDOWN);
+}
+
+static void try_reattach(void)
+{
+	char newdev[64] = "";
+
+	pthread_mutex_lock(&pcd.io);
+	if (pcd.fd >= 0) { close(pcd.fd); pcd.fd = -1; }
+
+	int fd = open_drive(newdev, sizeof(newdev));
+	if (fd >= 0) {
+		pcd.fd = fd;
+		snprintf(cur_dev, 64, "%s", newdev);
+		pcd.st_reattach++;
+		pcd.consec_fail = 0;
+		set_speed_cap();
+		printf("physcd: drive re-attached as %s (recovered from a usb reset)\n", newdev);
+	}
+	else {
+		printf("physcd: drive still missing, will retry\n");
+	}
+	pthread_mutex_unlock(&pcd.io);
+}
+
 static void *prefetch_thread(void *arg)
 {
 	(void)arg;
 	int rr = 0;                                /* round-robin start   */
 	double last_stats = now_ms();
+	double last_reattach = 0;
 
 	while (pcd.running) {
 		int target = -1;
@@ -414,6 +472,15 @@ static void *prefetch_thread(void *arg)
 			continue;
 		}
 
+		/* reads keep failing: the drive may have dropped off the bus
+		   and re-enumerated elsewhere. probe and rescan, at most once
+		   every 5s so a genuinely dead drive is not thrashed. */
+		if (pcd.consec_fail >= 8 && now_ms() - last_reattach > 5000) {
+			last_reattach = now_ms();
+			if (device_gone()) try_reattach();
+			else pcd.consec_fail = 0;   /* device is fine, just bad media */
+		}
+
 		if (target < 0) {
 			/* both windows full (or no toc yet): check again soon */
 			struct timespec ts = { 0, 20 * 1000 * 1000 };
@@ -427,8 +494,6 @@ static void *prefetch_thread(void *arg)
 
 // ---------------------------------------------------------------- api
 
-static char pref_dev[64] = "";       /* "" = autodetect */
-static char cur_dev[64] = "";        /* what we actually opened */
 
 void physcd_set_device(const char *dev)
 {

@@ -517,36 +517,105 @@ event in O(1).
 #### backend api to add (mister_physcd.h)
 
     typedef enum { PHYSCD_EV_NONE, PHYSCD_EV_DISC_IN, PHYSCD_EV_DISC_OUT } physcd_event_t;
-    int  physcd_watch_start(void);   // passive media watch, drive held open
+    int  physcd_watch_start(void);   // LIGHTWEIGHT: fd only
     void physcd_watch_stop(void);
     physcd_event_t physcd_poll_event(physcd_disc_t *type, physcd_region_t *region);
 
-watcher thread: every ~2s CDROM_DRIVE_STATUS + CDROM_MEDIA_CHANGED; on
-new media run load_toc + identify + region ONCE and publish the event
-under the existing mutex. it must NOT identify or read while a mount is
-active - the prefetcher owns the drive then; the watcher degrades to a
-pure status poll.
+watch mode must be CHEAP, and that means a second open mode. today
+physcd_open allocates the 9.5MB slot cache and spins up the prefetch
+thread; making the idle menu carry that just to notice a disc is
+unreasonable. physcd_watch_start opens the fd only - no cache, no
+prefetch thread - because physcd_media_changed/physcd_disc_present
+both return 0 while pcd.fd < 0 and so require the drive open.
+the full physcd_open stays exactly as it is for mount time.
 
-#### main-side state machine (new support/physcd/physcd_autoboot.cpp)
+watcher thread: every ~1-2s CDROM_DRIVE_STATUS + CDROM_MEDIA_CHANGED.
+identification must happen ON THIS THREAD, once per media change, never
+per tick: physcd_identify may trigger a full physcd_load_toc plus
+several raw sector reads and blocks for SECONDS. prior art independently
+reached the same conclusion and left a comment saying not to identify
+in the poll. it must also not read at all while a mount is active - the
+prefetcher owns the drive then, so the watcher degrades to a pure
+status poll.
 
-called from the co_ui side, cheap, non-blocking:
-  IDLE -> (DISC_IN) -> ANNOUNCE -> LOAD -> WAIT_CORE -> MOUNT -> DONE
-                                                     \-> FAILED
-- ANNOUNCE: Info("PSX disc detected\nLoading core...", ...) then DWELL
-  ~1.5s before loading. this dwell is REQUIRED, not cosmetic:
-  fpga_load_rbf() begins with OsdDisable() (fpga_io.cpp:428), so the
-  message is wiped the instant the load starts - without the dwell the
-  user never reads it.
-- LOAD: resolve rbf, fpga_load_rbf(path, NULL, NULL).
-- WAIT_CORE: poll is_<type>() until true plus a settle delay. core
-  identity comes from user_io_read_core_name() resetting the is_*
-  caches (user_io.cpp:420), so it is available in-process - no need to
-  read /tmp/CORENAME like the daemon did.
-- MOUNT: call the shared dispatcher (below).
-- DONE: second Info() naming the game (psx has the game id; megacd has
-  the region) - the first message is gone by now.
-- FAILED: Info() with the reason, then LATCH until the next media
-  change. without the latch a failing disc reloads the core forever.
+it must NEVER touch the OSD: Info/InfoMessage/OsdWrite are not
+thread-safe. publish a flag, let the menu tick render it (the same
+pattern scaler.cpp uses for screenshot results).
+
+#### THE ARCHITECTURE-DEFINING FACT: fpga_load_rbf EXECS
+
+`fpga_load_rbf` does not return. it calls app_restart(), which replaces
+the process image. every variable, every fd (including the physcd
+/dev/srN fd) and the prefetch pthread are destroyed. there is no
+"after the load" in the same process, so
+
+    detect -> load core -> mount        <-- IMPOSSIBLE as one sequence
+
+any code written that way is dead after the second statement. this is
+forced, not incidental: sidneivl's fork hit the same wall and its
+AutoLoadCore never mounts at all - the NEW process re-detects the disc
+from scratch and mounts it there. the feature is inherently TWO-PHASE.
+
+the only things that cross the exec are argv[1] (rbf path), argv[2]
+(xml/mgl path) and the filesystem.
+
+#### phase A - the menu process: detect, announce, hand off, load
+
+a poll function of its own, gated on is_menu(), called from the top of
+HandleUI (NOT hung off a menu-drawing branch the way prior art did it,
+which only ran when one specific page was being drawn):
+1. consume an event from the watcher thread (O(1), no ioctls here).
+2. draw the banner and set a timer. do NOT use Info() - see below.
+3. on a LATER tick (>=100ms, so the banner is actually on screen):
+   resolve the rbf, write the handoff marker, physcd_close(), then
+   fpga_load_rbf(). the process ends inside that call.
+4. FAILED/unknown disc: draw the reason, then LATCH until the next
+   media change, or a bad disc reloads the core forever.
+
+#### Info() DOES NOT WORK AT THE MENU - use OsdWrite
+
+`Info()` is guarded by `if (menustate <= MENU_INFO)` (menu.cpp:7962),
+and the menu core at rest sits ABOVE that with its browser open. so
+the obvious `Info("PSX disc detected...")` silently does nothing -
+this is the single biggest trap in the whole feature. the bootcore
+countdown (menu.cpp:7628-7723) is the working precedent: it writes
+directly to OSD lines 12-15 with OsdWrite on a 100ms tick, then loads
+a core on a later tick, and it deliberately bypasses Info() for
+exactly this reason. copy that.
+(MenuHide() then Info() also works but tears down whatever the user
+was doing - acceptable only because we are about to load a core.)
+Info() DOES work in phase B, where no menu is open - which is why the
+existing mcd_set_image Info() calls already work.
+
+#### handoff marker: /tmp/physcd_autoboot
+
+phase A writes it just before the exec; phase B consumes it. contents:
+the expected core name and the device path. this is what distinguishes
+"the disc made me load this core" from "the user loaded this core by
+hand", and it is the one improvement over prior art worth making:
+sidneivl's re-detect fires on ANY core start, so loading psx manually
+to play a chd while a disc happens to sit in the drive would hijack
+it. with a marker, phase B only auto-mounts when phase A asked it to,
+and deletes the marker immediately so it is strictly one-shot.
+(MGL was considered and rejected: it needs a browsable path, and
+PHYSCD_SENTINEL is not one - menu.cpp:2736 prefixes anything not
+starting with '/' with HomeDir(). it would need a new action type.)
+
+#### phase B - the new core process: settle, mount, report
+
+at startup, after user_io_init returns:
+1. no marker -> do nothing at all. manual core loads stay untouched.
+2. marker present but naming a different core -> delete it and do
+   nothing (stale).
+3. match -> wait a settle delay before mounting. "user_io_init
+   returned" is HPS-side readiness only; it says nothing about the
+   core's own cpu/bios being up. there is no handshake to wait on -
+   MGL exists precisely because cores need extra wall-clock time and
+   expresses it as a hand-tuned per-item delay in SECONDS. budget
+   ~2s, make it configurable, tune per core.
+4. mount via the shared dispatcher, delete the marker, then Info()
+   naming the game (psx has the game id, megacd the region). Info()
+   works here.
 
 #### trigger policy (important - do not hijack an active game)
 
@@ -559,45 +628,99 @@ called from the co_ui side, cheap, non-blocking:
 
 - rbf resolution: bootcore.cpp already has findCore(), which recurses
   the _* dirs, prefers an exact name match and otherwise takes the
-  NEWEST by date - exactly what the daemon reimplemented. GOTCHA: the
-  declaration in bootcore.h:12 is STALE (3-arg char* version) and does
-  not match the static 2-arg CoreMatch version in the .cpp, so it will
-  not link. add a properly declared wrapper next to it rather than
-  trusting that header line.
+  NEWEST by date - exactly what the daemon reimplemented. two gotchas:
+  it is `static` (not linkable), AND bootcore.h:12 declares a stale
+  3-arg signature matching no definition in the tree. add a narrow
+  wrapper (e.g. `bool find_core_rbf(const char *coreName, char *out,
+  size_t len)`) in bootcore.cpp rather than trusting that header.
+  the caller owns CoreMatch::path and must delete[] it.
+- findCore is CASE-SENSITIVE, so the disc-type -> core-name table must
+  carry the exact rbf basename casing, NOT the uppercase is_*()
+  identity strings: MEGACD->"MegaCD", PSX->"PSX", SATURN->"Saturn",
+  PCECD->"TurboGrafx16", NEOGEO->"NeoGeo". feeding it "MEGACD" finds
+  nothing.
 - mount dispatch: factor the core-type switch currently inside the
   mount_phys fifo handler (input.cpp) into one shared function so the
-  fifo command and autoboot cannot drift apart.
-- disc type -> core name for findCore: MEGACD->"MegaCD", PSX->"PSX",
-  SATURN->"Saturn", PCECD->"TurboGrafx16", NEOGEO->"NeoGeo".
+  fifo command, phase B and any future core cannot drift apart.
+- worth copying from prior art: the blink-while-identifying icon on
+  the menu (good ux, costs nothing), and eject_cdrom's door handling
+  (CDROM_LOCKDOOR 0, 100ms, CDROMEJECT, retry once after 500ms on
+  EBUSY) given our documented door-lock quirk.
+- worth NOT copying: their fingerprinting (ours is strictly better -
+  raw 2352 reads offset from first_data_lba, mode2-form1 aware, and
+  it detects pcecd and neogeo too), their hardcoded four-path bios
+  list (ours is region-matched), and their unanchored rbf prefix match.
 
 #### config (cfg.cpp/cfg.h + MiSTer.ini)
 
     physcd_autoboot=1     ; 0 off, 1 menu only (default), 2 also swap
     physcd_device=        ; optional pin, e.g. /dev/sr1
+    physcd_mount_delay=2  ; phase B settle seconds
+
+adding an option is just two edits: a field in cfg_t (cfg.h) and a row
+in the ini_vars table (cfg.cpp) - the table IS the registry, no other
+registration step. use min/max 0/1 for booleans since ini_parse_numeric
+clamps. GOTCHA: ini section matching is against the RUNNING core's
+name, so at the menu only `[MiSTer]` applies - a `[PSX]` section is
+never read there. the autoboot option must live in `[MiSTer]`.
 
 #### edge cases that must be handled
 
 1. disc already in at power-on: do not race bootcore_init. bootcore
    wins at startup; autoboot only acts once the menu is settled.
+   (bootcore also re-multiplies cfg.bootcore_timeout by 10 in place at
+   bootcore.cpp:265, so never call bootcore_init twice.)
 2. failure latch, per above.
 3. audio cd / unknown disc: message, load nothing.
-4. the drive is now held open for the whole session, so external tools
-   (physcd_probe over ssh, zaparoo) must not touch it while mister
-   runs. document loudly.
-5. Info() only renders when menustate <= MENU_INFO (menu.cpp:7962), so
-   a user deep in a submenu will not see it - consider MenuHide() first.
-6. autoboot=0 must leave `mount_phys` working exactly as today.
+4. menu-time watching holds the drive fd for the whole idle session,
+   so external tools (physcd_probe over ssh, zaparoo) must not touch
+   it while mister runs. document loudly. the fd-only watch mode keeps
+   the cost to one fd rather than fd + thread + 9.5MB.
+5. autoboot=0 must leave `mount_phys` working exactly as today.
+6. phase A must physcd_close() BEFORE fpga_load_rbf: the exec would
+   otherwise tear down the process with the prefetch thread possibly
+   mid-SG_IO, leaving the drive busy for the next process.
 
 #### phasing and acceptance
 
-- 5b.1 watcher api, no behaviour change; prove it by logging events
-- 5b.2 state machine + messages, menu-only autoboot
-      ACCEPT: insert sonic cd at the menu -> message -> megacd core ->
-      game boots hands-free. same for x-files/psx.
-- 5b.3 config + rbf resolution via the bootcore wrapper
+- 5b.1 lightweight watch api + event queue, no behaviour change;
+      prove it by logging insert/eject events at the menu
+- 5b.2 phase A: menu tick, OsdWrite banner, handoff marker, load
+      ACCEPT: insert a disc at the menu -> banner is READ-able ->
+      correct core loads
+- 5b.3 phase B: consume marker, settle, mount, Info
+      ACCEPT: sonic cd and x-files each boot hands-free end to end;
+      loading psx by hand with a disc in the drive does NOT hijack
+- 5b.4 config + the bootcore findCore wrapper
       ACCEPT: physcd_autoboot=0 disables it; mount_phys unaffected
-- 5b.4 swap into an already-running matching core
-- 5b.5 delete physcdd.c and its docs references
+- 5b.5 megacd hot-swap (see below)
+- 5b.6 delete physcdd.c and its docs references
+
+#### 5b.5 hot-swap: megacd yes, psx no
+
+megacd has a complete tray model and mcd_set_image already does
+OPEN -> (load) -> STOP. a swap path needs a NEW entry point (e.g.
+mcd_swap_disc) that keeps the drive open, calls physcd_load_toc into
+cdd.toc in place (it already invalidates the sector cache), sets
+cdd.loaded, forces CD_STAT_OPEN with latency 0, HOLDS ~500ms, then
+CD_STAT_STOP with latency 10. the 500ms dwell is the whole trick - the
+bios polls status and must observe OPEN long enough to believe the
+tray moved before it re-reads the toc. today that dwell only happens
+by accident because Load() blocks for seconds in between.
+do NOT get there by relaxing `if (phys) same_game = 0;` in
+mcd_set_image - that line is correct for first mount (and is what lets
+a failed mount recover); hot-swap needs its own path.
+
+psx has no lid, no tray and no status bit for either. re-mounting sets
+the reset bit in the metadata block, i.e. a swap resets the machine.
+real lid emulation would need a new core-side status bit in the PSX
+RTL - it does not exist to be wired up, so psx multi-disc swap is OUT
+OF SCOPE and should be documented as such. two cheap partial wins
+worth testing: mount_cd(0, ...) is the closest thing to "tray open"
+for signalling disc removal without a reset, and psx.cpp's
+`if (phys) same_game = 0;` currently re-mounts the memory card on
+every swap - for a multi-disc game the card should follow the GAME,
+not the disc.
 
 ### phase 6: more cores
 

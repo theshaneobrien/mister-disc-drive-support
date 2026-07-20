@@ -30,6 +30,16 @@ Saturn, NeoGeo CD, PC Engine CD, and swapping discs mid game are not done yet. T
 2. For MegaCD region matching, drop your BIOS files into the MegaCD home folder as boot_EU.rom, boot_US.rom, and boot_JP.rom. A plain boot.rom still works as a catch all. A PAL disc running on a US BIOS will play but stutter, so this is worth setting up.
 3. Reboot.
 
+## Region
+
+A disc and the console BIOS have to agree on region or a game either refuses to boot or plays at the wrong speed. Each core handles this differently, so:
+
+* Saturn: the core has its own Region option. Set it to Auto in the core's OSD menu and it reads the region off the disc. One boot.rom is all you need.
+* PlayStation: handled for you. The region is detected and sent to the core.
+* MegaCD: the BIOS is the region. Drop boot_EU.rom, boot_US.rom, and boot_JP.rom into the MegaCD home folder and the matching one loads automatically. A plain boot.rom still works as a catch all. Some MegaCD setups also have an Auto region option in the core, so try that first if you have it.
+
+Short version: if a core has an Auto region setting, use it. Otherwise provide the region named BIOS files above.
+
 ## Using it
 
 Drive plugged in, disc inside:

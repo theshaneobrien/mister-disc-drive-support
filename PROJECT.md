@@ -660,6 +660,30 @@ code I had reasoned about carefully and written a confident comment
 about. the comment was the tell - it asserted behaviour no code
 implemented. cheap to check, and nobody had checked.
 
+#### 2026-07-20: drive speed capped at 4x (was: maximum)
+
+`physcd_open` used to send CDROM_SELECT_SPEED 0 = MAXIMUM. wrong call
+for this project's actual media:
+- the requirement is 172 KB/s sustained (1x raw cdda), ~353 KB/s for
+  the worst realistic case (data + cdda together, or psx 2x mode).
+  4x = ~708 KB/s leaves ~2x headroom.
+- tracking errors scale with rpm on warped, dirty or 30-year-old
+  discs, and the OUTER edge - where rot starts and where cdrdao
+  stalled for a minute per minute of audio - is exactly where a drive
+  spins fastest.
+- our prefetcher already works a drive far harder than a real console
+  ever did; this drive class has wedged into a no-media state twice
+  under sustained load. less rpm = less heat, less noise, less wear.
+- costs little: the measured "maximum" was only 741-1072 KB/s (~4-6x,
+  CAV), so the cap mostly reins in the outer edge.
+re-applied per disc, because a media change resets it on many drives,
+and best-effort because plenty of drives ignore SET SPEED entirely.
+
+`physcd_probe <dev> <Nx>` now takes an optional speed so the
+throughput/seek tradeoff can be MEASURED on a troublesome disc rather
+than argued about - e.g. compare `physcd_probe /dev/sr0 0` (maximum)
+against `physcd_probe /dev/sr0 4` and `2` on the pal sonic cd.
+
 ### phase 7: polish
 - scratched-disc watchdog behavior review (backend currently serves
   zeros after 3 retries so cores don't hang; verify cores tolerate it)
@@ -727,7 +751,8 @@ not a plan.
 | index >1 audio positions (rare games) | drive toc lacks index marks; accept as known limitation, document |
 | usb power spikes on spin-up | powered hub, document requirement |
 | bios region does not match disc region (plays, but stutters) | detect region from the disc header and load boot_<REGION>.rom; warn via osd when falling back to a mismatched boot.rom. file-backed games dodge this via per-folder cd_bios.rom, physical discs cannot |
-| aging/rotting discs read marginally, esp. outer edge | backend zero-fills after retries so the core never hangs, and now COUNTS it (stats `BAD`) so it can't masquerade as a clean read. possible enhancement: we currently request CDROM_SELECT_SPEED 0 = MAXIMUM, which is right for prefetch headroom on a good disc but wrong for a marginal one - slower reads recover more. consider dropping speed adaptively once BAD goes nonzero |
+| drive worked far harder than a real console works it | the prefetcher holds the device open and pulls 96 sectors ahead of both streams for a whole session, where a real console reads on demand and parks the head. mitigated by capping speed at 4x (see below); if a long session still wedges the drive, consider idling the prefetcher when the readahead window has been full for a while |
+| aging/rotting discs read marginally, esp. outer edge | backend zero-fills after retries so the core never hangs, and COUNTS it (stats `BAD`) so it can't masquerade as a clean read. DONE 2026-07-20: speed capped at 4x instead of requesting maximum (see below). further idea if BAD is still nonzero: drop to 2x adaptively once it goes up |
 | upstream drift | keep all changes behind toc.phys / sentinel; rebase quarterly |
 | neogeo needs iso9660 | prefer tiny userspace iso9660 reader over kernel module to keep "stock kernel" property; the same reader is needed for psx achievement hashing, so it pays for itself twice |
 | RA fork and our fork claim the same /media/fat/MiSTer slot | merge the two forks (phase 8), do it early and rebase often; two-binary switcher only as a retreat |

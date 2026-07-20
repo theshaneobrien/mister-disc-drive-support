@@ -213,8 +213,23 @@ static const char *fingerprint(int fd, struct track_info *tracks, int ntracks)
 int main(int argc, char **argv)
 {
 	const char *dev = (argc > 1) ? argv[1] : "/dev/sr0";
+	/* optional 2nd arg: speed cap in Nx (0 = drive maximum). the
+	 * backend caps at 4x because rpm is what makes marginal media read
+	 * badly - run the probe at a few values on a troublesome disc to
+	 * see the throughput/seek tradeoff for yourself. */
+	int speed = (argc > 2) ? atoi(argv[2]) : -1;
+
 	int fd = open(dev, O_RDONLY | O_NONBLOCK);
 	if (fd < 0) { perror(dev); return 1; }
+
+	if (speed >= 0)
+	{
+		if (ioctl(fd, CDROM_SELECT_SPEED, speed) < 0)
+			printf("speed: cap not supported by this drive\n");
+		else
+			printf("speed: requested %s\n",
+				speed ? "cap" : "drive maximum");
+	}
 
 	int status = ioctl(fd, CDROM_DRIVE_STATUS, CDSL_CURRENT);
 	printf("drive status: %s\n",

@@ -186,6 +186,10 @@ static const char *fingerprint(int fd, struct track_info *tracks, int ntracks)
 		uint8_t *user = buf + 16;
 		if (!memcmp(user, "SEGADISCSYSTEM", 14)) return "mega cd";
 		if (!memcmp(user, "SEGA SEGASATURN", 15)) return "saturn";
+		/* 3do: record type 0x01 then five 0x5A sync bytes */
+		if (user[0] == 0x01 && user[1] == 0x5A && user[2] == 0x5A
+			&& user[3] == 0x5A && user[4] == 0x5A && user[5] == 0x5A)
+			return "3do";
 	}
 
 	/* iso9660 pvd at lba 16: system identifier at user offset 8 */

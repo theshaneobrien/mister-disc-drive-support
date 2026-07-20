@@ -516,9 +516,13 @@ static void *prefetch_thread(void *arg)
 					}
 					else {
 						/* capture a display label now, on this thread,
-						   so the menu query stays O(1) and non-blocking */
+						   so the menu query stays O(1) and non-blocking.
+						   iso volume label first; if blank/generic, fall
+						   back to the psx serial (X-Files etc have no
+						   useful label). */
 						char lbl[64];
-						physcd_disc_label(lbl, sizeof(lbl));
+						if (!physcd_disc_label(lbl, sizeof(lbl)))
+							physcd_disc_serial(lbl, sizeof(lbl));
 						pthread_mutex_lock(&pcd.lock);
 						snprintf(pcd.watch_label, sizeof(pcd.watch_label), "%s", lbl);
 						pcd.watch_type = (int)t;
@@ -1098,8 +1102,74 @@ int physcd_disc_label(char *out, int outsz)
 		else if (lbl[i] < 0x20 || (uint8_t)lbl[i] > 0x7E) lbl[i] = ' ';
 	}
 
+	/* "PLAYSTATION" is the generic volume id most psx discs carry - it
+	   is the console, not the game, so treat it as no useful name and
+	   let the caller fall back to the serial */
+	if (!strcasecmp(lbl, "PLAYSTATION")) return 0;
+
 	snprintf(out, outsz, "%s", lbl);
 	return strlen(out);
+}
+
+/*
+ * psx game serial (SLES-01234 etc) as a name fallback: psx discs
+ * frequently have a blank or generic iso label, but the boot
+ * executable is named after the serial and appears as a root-directory
+ * filename "SLES_012.34;1". scan the directory region for it. this is
+ * exactly what psx_get_game_info does, replicated here so it works at
+ * menu-watch time with no core loaded. returns strlen, 0 if none.
+ * BLOCKING (reads the disc) - call only from the watcher thread.
+ */
+int physcd_disc_serial(char *out, int outsz)
+{
+	static const char *pfx[] = {
+		"SCES","SLES","SCUS","SLUS","SCPS","SLPS","SLPM","SCPM",
+		"SIPS","SCED","SLED","SCZS","PAPX","PCPX","PEPX","PUPX"
+	};
+	if (!out || outsz < 2) return 0;
+	out[0] = 0;
+	if (pcd.first_data_lba < 0) return 0;
+
+	/* iso root directory sits a few sectors past the PVD; scan a window
+	   that covers the usual layouts */
+	for (int s = 16; s <= 64; s++) {
+		uint8_t user[2048];
+		if (physcd_read_data2048(pcd.first_data_lba + s, user)) continue;
+
+		for (int p = 0; p < (int)(sizeof(pfx) / sizeof(pfx[0])); p++) {
+			uint8_t *m = (uint8_t *)memmem(user, sizeof(user), pfx[p], 4);
+			if (!m) continue;
+
+			char *start = (char *)m;
+			char *semi = (char *)memmem(start, sizeof(user) - (start - (char *)user), ";", 1);
+			if (!semi) continue;
+			int len = (int)(semi - start);
+			if (len < 8 || len > 11) continue;   /* SLES_012.34 = 11 */
+
+			char id[16];
+			memcpy(id, start, len);
+			id[len] = 0;
+			if (id[4] == '_') id[4] = '-';        /* SLES_ -> SLES- */
+			char *dot = strchr(id, '.');          /* drop the dot   */
+			if (dot) memmove(dot, dot + 1, strlen(dot));
+			snprintf(out, outsz, "%s", id);
+			return (int)strlen(out);
+		}
+	}
+	return 0;
+}
+
+/* friendly console name for the menu row ("Mega CD", not "MegaCD") */
+const char *physcd_console_name(physcd_disc_t t)
+{
+	switch (t) {
+	case PHYSCD_DISC_MEGACD: return "Mega CD";
+	case PHYSCD_DISC_SATURN: return "Saturn";
+	case PHYSCD_DISC_PSX:    return "PlayStation";
+	case PHYSCD_DISC_PCECD:  return "TurboGrafx-CD";
+	case PHYSCD_DISC_NEOGEO: return "Neo Geo CD";
+	default:                 return physcd_disc_name(t);
+	}
 }
 
 const char *physcd_disc_name(physcd_disc_t t)

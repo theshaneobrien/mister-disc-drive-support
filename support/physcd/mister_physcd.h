@@ -150,8 +150,16 @@ physcd_event_t physcd_poll_event(physcd_disc_t *type, physcd_region_t *region, i
 void physcd_forget_disc(void);
 
 // human-readable name from the iso9660 volume label ("SONIC CD"), for
-// the menu. blocking (reads the disc); returns strlen, 0 if none.
+// the menu. blocking (reads the disc); returns strlen, 0 if none or if
+// the label is the generic "PLAYSTATION".
 int physcd_disc_label(char *out, int outsz);
+
+// psx game serial ("SLES-01234") as a name fallback when the iso label
+// is blank. blocking (reads the disc); returns strlen, 0 if none.
+int physcd_disc_serial(char *out, int outsz);
+
+// friendly console name for the menu ("Mega CD", "PlayStation")
+const char *physcd_console_name(physcd_disc_t t);
 
 // O(1) snapshot for the menu row, safe from the ui thread: 1 if a disc
 // is present, filling *type and a display name (label or console name).

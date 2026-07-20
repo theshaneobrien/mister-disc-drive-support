@@ -7667,18 +7667,16 @@ void HandleUI(void)
 				&& strcasestr(fs_pFileExt, "RBF") && !physcd_autoboot_busy()
 				&& physcd_menu_dirty())
 			{
-				// only rebuild when the ROW presence actually toggles, so
-				// an audio/unknown disc or a plain eject (no row either way)
-				// does not bounce the cursor for no visible change
-				static int row_shown = 0;
-				char probe[256];
-				int now = physcd_menu_row(probe, sizeof(probe));
-				if (now != row_shown)
-				{
-					row_shown = now;
-					ScanDirectory(selPath, SCANF_INIT, fs_pFileExt, fs_Options, NULL, filter[0] ? filter : NULL);
-					menustate = MENU_FILE_SELECT1;
-				}
+				// remember the selected core so the rebuild does not
+				// bounce the cursor to the top (skip if it is our row)
+				static char keep[256];
+				keep[0] = 0;
+				if (flist_nDirEntries() && !physcd_is_menu_row(flist_SelectedItem()->de.d_name))
+					snprintf(keep, sizeof(keep), "%s", flist_SelectedItem()->de.d_name);
+
+				ScanDirectory(selPath, SCANF_INIT, fs_pFileExt, fs_Options, NULL, filter[0] ? filter : NULL);
+				flist_select_by_name(keep);
+				menustate = MENU_FILE_SELECT1;
 			}
 
 			// physcd autoboot needs the fast tick too: its banner has to

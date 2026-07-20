@@ -209,21 +209,35 @@ int physcd_is_menu_row(const char *name)
 
 int physcd_menu_row(char *out, int outsz)
 {
+	/* the row is tied to the DRIVE, not the disc: show it whenever a
+	   drive is attached, so it is a stable fixture at the bottom of the
+	   list rather than something that pops in and out. no drive -> no
+	   row at all. */
+	if (!physcd_watching()) return 0;
+
 	physcd_disc_t t = PHYSCD_DISC_NONE;
 	char label[64];
-	if (!physcd_menu_status(label, sizeof(label), &t)) return 0;
-	if (!mountable(t)) return 0;   /* only offer discs we can boot+mount */
+	int have = physcd_menu_status(label, sizeof(label), &t);
 
-	/* and only when the matching core is actually installed - showing a
-	   row that then silently fails to load (the browser cannot even draw
-	   an Info popup, its menustate is above MENU_INFO) is worse than no
-	   row. this makes selecting the row effectively always succeed. */
-	const char *core = core_name_for(t);
-	char rbf[1024];
-	if (!core || !find_core_rbf(core, rbf, sizeof(rbf))) return 0;
+	/* a mountable disc whose core is installed -> a real Play action.
+	   the installed-core check matters because the browser cannot draw
+	   an error popup (its menustate is above MENU_INFO), so a row that
+	   then fails to load would be worse than showing "Insert Disc". */
+	if (have && mountable(t))
+	{
+		const char *core = core_name_for(t);
+		char rbf[1024];
+		if (core && find_core_rbf(core, rbf, sizeof(rbf)))
+		{
+			if (label[0]) snprintf(out, outsz, "Play: %s - %s", label, physcd_console_name(t));
+			else          snprintf(out, outsz, "Play %s Disc", physcd_console_name(t));
+			return 1;
+		}
+	}
 
-	if (label[0]) snprintf(out, outsz, "Play Disc: %s", label);
-	else          snprintf(out, outsz, "Play %s Disc", physcd_disc_name(t));
+	/* drive attached but nothing playable in it (empty, audio, or a core
+	   we do not support / is not installed) */
+	snprintf(out, outsz, "Insert Disc");
 	return 1;
 }
 

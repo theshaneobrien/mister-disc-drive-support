@@ -832,16 +832,55 @@ do NOT get there by relaxing `if (phys) same_game = 0;` in
 mcd_set_image - that line is correct for first mount (and is what lets
 a failed mount recover); hot-swap needs its own path.
 
-psx has no lid, no tray and no status bit for either. re-mounting sets
-the reset bit in the metadata block, i.e. a swap resets the machine.
-real lid emulation would need a new core-side status bit in the PSX
-RTL - it does not exist to be wired up, so psx multi-disc swap is OUT
-OF SCOPE and should be documented as such. two cheap partial wins
-worth testing: mount_cd(0, ...) is the closest thing to "tray open"
-for signalling disc removal without a reset, and psx.cpp's
-`if (phys) same_game = 0;` currently re-mounts the memory card on
-every swap - for a multi-disc game the card should follow the GAME,
-not the disc.
+CORRECTION 2026-07-20: an earlier draft here said psx swap is OUT OF
+SCOPE because "re-mounting resets the machine". that was WRONG - reset
+is a CHOICE, not a consequence. psx_mount_cd computes `reset` from the
+noreset mechanism (psx.cpp:811-816): stock mister already does no-reset
+disc swaps for multi-disc games (FF etc) - you mount disc2 from the
+OSD, and because it is the same folder (or a noreset.txt is present)
+`reset` stays 0, so send_cue_and_metadata sends reset=0 and mount_cd
+signals the new disc WITHOUT a reset. so the psx core demonstrably
+supports lid-open/close disc swap; the signal is the metadata reset
+bit + mount_cd, verified in-tree (no status bit 42, no RTL change -
+that was a different fork's approach). so psx multi-disc IS in scope.
+
+what a physical psx swap needs, then:
+- detect eject then insert WHILE THE CORE RUNS (today the watcher is
+  menu-only; see the gap note below)
+- re-read the toc (physcd_forget_disc + physcd_load_toc) into the psx
+  toc with the same 150 bias load_phys applies
+- call the swap with reset=0, NOT through the current physical mount
+  which forces `same_game=0` (that path resets and reloads the memory
+  card). the card must follow the GAME across a multi-disc swap, not
+  the disc, so keep the card mounted and only push a new toc + mount_cd.
+- FF-style "insert disc 2": the game polls for the swap; the single
+  mount_cd is what stock multi-disc relies on. verify on hardware
+  whether a mount_cd(0) "tray open" pulse first is needed for the game
+  to notice the removal, or whether the new-disc mount alone suffices.
+- vib ribbon (data game -> ANY audio cd -> back): same mechanism, and
+  a great test because it exercises data->audio->data swaps and our
+  backend already identifies + reads audio cds. the audio disc has no
+  game id, so keep the running game's save/card, do not re-key on it.
+
+### THE GAP that blocks all of this today
+
+multi-disc does NOT work yet, for psx OR megacd, and the reason is
+structural: the disc watcher (mister_physcd watch_mode) runs ONLY at
+the menu. once a cd core is loaded and a disc mounted, watch_mode is
+off and NOTHING polls the drive for eject/insert. so a physical swap
+mid-game is invisible: the core keeps requesting lbas, the backend
+keeps serving them from the drive - now with the WRONG toc for the new
+disc - and no lid signal ever reaches the game, so FF sits on "insert
+disc 2" forever even after you swap.
+
+phase 7 swap = give each running cd core a drive-change poll. options:
+1. reuse the per-core poll (mcd_poll/psx_poll already run every ~13ms
+   in user_io_poll) to also check CDROM_MEDIA_CHANGED at ~500ms and
+   drive the swap. cheap, no new thread, core-local.
+2. or keep a lightweight watch thread alive across the mount and have
+   the core poll consume its events (like the menu does).
+either way the swap itself is core-specific: megacd = CD_STAT_OPEN
+500ms hold -> CD_STAT_STOP; psx = new toc + mount_cd with reset=0.
 
 ### phase 6: more cores
 

@@ -132,7 +132,20 @@ sentinel path convention: `set_image` functions receive the string
 - windows build: `.\tools\build.ps1` (docker image `mister-armcc`,
   object cache in volume `mister-objcache`, binary lands in
   `Main_MiSTer\bin\MiSTer`). tools: `arm-none-linux-gnueabihf-gcc -O2
-  -static` inside the same image.
+  -static` inside the same image. `-Clean` wipes the object cache.
+- 2026-07-20 hard lesson: the UPSTREAM Makefile's dependency rule
+  wrote `-MT $*.cpp.o` without the bin/ prefix, so header changes
+  NEVER rebuilt dependent objects. adding two fields to cfg_t then
+  produced a half-old-layout binary: stale video.cpp read fb_size
+  from bootcore_timeout's low byte (10 -> clamp 4 -> 480x270
+  framebuffer) and fb_terminal as 0 -> menu never drawn -> pure black
+  screen over a valid signal, while rebuilt code (autoboot, cores,
+  audio) worked normally underneath. cost half an evening and looked
+  exactly like a video bug in the new feature. fixed in the fork
+  Makefile (commit 8d6f85d) and worth offering upstream - anyone
+  building incrementally on a header change ships Frankenstein
+  binaries. if a symptom ever again makes no sense for code that
+  "cannot" behave that way, suspect the build before the source.
 - integration was: `support/physcd/` (picked up automatically by the
   Makefile `$(wildcard ./support/*/*.cpp)` - no Makefile edit), plus
   `int phys;` in cd.h toc_t after `int sectorSize;`. DONE.

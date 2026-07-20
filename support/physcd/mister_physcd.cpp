@@ -145,9 +145,13 @@ static struct {
 	double st_worst_io_ms;        /* worst drive transaction        */
 	volatile int consec_fail;     /* consecutive unreadable bursts  */
 	uint32_t st_reattach;         /* times the drive came back      */
+	volatile int watch_mode;      /* menu is watching for a disc    */
+	volatile int ev;              /* physcd_event_t, pending        */
+	volatile int ev_type;
+	volatile int ev_region;
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0 };
 
 static int track_of(int lba)
 {
@@ -462,8 +466,43 @@ static void *prefetch_thread(void *arg)
 	double last_reattach = 0;
 	double last_io = now_ms();
 
+	double last_watch = 0;
+	int was_present = -1;
+
 	while (pcd.running) {
 		int target = -1;
+
+		/* menu watch mode: nothing is mounted, so this thread's job is
+		   to notice a disc instead of prefetching. identification runs
+		   HERE because it can block for seconds - the ui cannot. */
+		if (pcd.watch_mode) {
+			if (now_ms() - last_watch >= 2000) {
+				last_watch = now_ms();
+
+				int present = physcd_disc_present();
+				int changed = physcd_media_changed();
+
+				if (present && (was_present != 1 || changed)) {
+					physcd_disc_t t = physcd_identify();
+					physcd_region_t r = physcd_region();
+					pcd.ev_type = (int)t;
+					pcd.ev_region = (int)r;
+					pcd.ev = (int)PHYSCD_EV_DISC_IN;
+					printf("physcd: disc detected: %s%s%s\n",
+						physcd_disc_name(t),
+						*physcd_region_name(r) ? " region " : "",
+						physcd_region_name(r));
+				}
+				else if (!present && was_present == 1) {
+					pcd.ev = (int)PHYSCD_EV_DISC_OUT;
+					printf("physcd: disc removed\n");
+				}
+				was_present = present ? 1 : 0;
+			}
+			struct timespec ts = { 0, 50 * 1000 * 1000 };
+			nanosleep(&ts, NULL);
+			continue;
+		}
 
 		/* serve the neediest active window, alternating which one
 		   gets looked at first so neither stream starves */
@@ -974,6 +1013,38 @@ const char *physcd_disc_name(physcd_disc_t t)
 	case PHYSCD_DISC_NONE:   return "No Disc";
 	default:                 return "Unknown";
 	}
+}
+
+int physcd_watch_start(void)
+{
+	if (physcd_open(NULL)) return -1;
+	pcd.ev = (int)PHYSCD_EV_NONE;
+	pcd.watch_mode = 1;
+	printf("physcd: watching %s for a disc\n", cur_dev);
+	return 0;
+}
+
+void physcd_watch_stop(void)
+{
+	pcd.watch_mode = 0;
+	pcd.ev = (int)PHYSCD_EV_NONE;
+	physcd_close();
+}
+
+int physcd_watching(void)
+{
+	return pcd.watch_mode;
+}
+
+physcd_event_t physcd_poll_event(physcd_disc_t *type, physcd_region_t *region)
+{
+	physcd_event_t e = (physcd_event_t)pcd.ev;
+	if (e == PHYSCD_EV_NONE) return e;
+
+	if (type) *type = (physcd_disc_t)pcd.ev_type;
+	if (region) *region = (physcd_region_t)pcd.ev_region;
+	pcd.ev = (int)PHYSCD_EV_NONE;
+	return e;
 }
 
 void physcd_close()

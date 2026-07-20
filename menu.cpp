@@ -7632,9 +7632,13 @@ void HandleUI(void)
 
 		if (!rtc_timer || CheckTimer(rtc_timer))
 		{
-			rtc_timer = GetTimer(cfg.bootcore[0] != '\0' ? 100 : 1000);
+			// physcd autoboot needs the fast tick too: its banner has to
+			// get screen time before fpga_load_rbf disables the osd
+			rtc_timer = GetTimer((cfg.bootcore[0] != '\0' || physcd_autoboot_busy()) ? 100 : 1000);
 			char str[64] = { 0 };
 			char straux[64];
+
+			physcd_autoboot_menu_tick();
 
 			if (cfg.bootcore[0] != '\0')
 			{

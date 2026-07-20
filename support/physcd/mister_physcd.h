@@ -120,6 +120,27 @@ physcd_region_t physcd_region_from_md_header(const uint8_t *hdr, int len);
 // "JP" / "US" / "EU", or "" when unknown
 const char *physcd_region_name(physcd_region_t r);
 
+// ---------------------------------------------------------------- watch
+//
+// menu-side disc watching. the drive is opened and the existing
+// prefetch thread - idle anyway while nothing is mounted - polls media
+// status and identifies a new disc on ITS OWN thread, because
+// physcd_identify can block for seconds and the ui runs cooperatively
+// on a ~1ms budget. the menu then consumes an event in O(1).
+typedef enum {
+	PHYSCD_EV_NONE = 0,
+	PHYSCD_EV_DISC_IN,      // new disc, identified
+	PHYSCD_EV_DISC_OUT,     // tray opened / disc gone
+} physcd_event_t;
+
+int physcd_watch_start(void);
+void physcd_watch_stop(void);
+int physcd_watching(void);
+
+// non-blocking; returns the pending event and clears it. never call
+// any osd function from the watcher - this is the handoff.
+physcd_event_t physcd_poll_event(physcd_disc_t *type, physcd_region_t *region);
+
 void physcd_close();
 
 #endif

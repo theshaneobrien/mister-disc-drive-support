@@ -6279,23 +6279,9 @@ int input_test(int getchar)
 						if (*p >= '0' && *p <= '9') snprintf(dev, sizeof(dev), "/dev/sr%c", *p);
 						physcd_set_device(dev);
 
-						if (is_megacd())
-						{
-							mcd_set_image(0, PHYSCD_SENTINEL);
-						}
-						else if (is_psx())
-						{
-							// f_index/s_index as the menu uses for the cd slot
-							psx_mount_cd(1, 1, PHYSCD_SENTINEL);
-						}
-						else if (is_saturn() || is_pce() || is_neogeo_cd() || is_x86())
-						{
-							printf("physcd: core '%s' not supported yet\n", user_io_get_core_name());
-						}
-						else
-						{
-							printf("physcd: no physical CD support for core '%s'\n", user_io_get_core_name());
-						}
+						// shared with autoboot phase B so the two paths
+						// cannot drift apart as cores are added
+						physcd_mount_current_core();
 					}
 				}
 			}

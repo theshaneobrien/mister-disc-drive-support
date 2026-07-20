@@ -255,6 +255,24 @@ static CoreMatch findCore(const char *name, const char *coreName)
 	return best;
 }
 
+/*
+ * narrow wrapper so other code can resolve a core name to an rbf path
+ * without duplicating the recursive scan. findCore itself is static and
+ * returns a CoreMatch whose path the caller must delete[]; the stale
+ * declaration in bootcore.h matches no definition and cannot be used.
+ */
+int find_core_rbf(const char *coreName, char *out, int outsz)
+{
+	if (!coreName || !out || outsz <= 0) return 0;
+
+	CoreMatch m = findCore(getRootDir(), coreName);
+	if (!m.path) return 0;
+
+	snprintf(out, outsz, "%s", m.path);
+	delete[] m.path;
+	return 1;
+}
+
 void bootcore_init(const char *path)
 {
 	char *auxpointer;

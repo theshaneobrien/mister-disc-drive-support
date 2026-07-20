@@ -12,6 +12,13 @@ char *loadLastcore();
 char *findCore(const char *name, char *coreName, int indent);
 void bootcore_init(const char *path);
 
+// resolve a core name (rbf basename, CASE-SENSITIVE - "MegaCD", not
+// "MEGACD") to a full rbf path, preferring an exact match and
+// otherwise the newest by date. 1 on success. wraps the same recursive
+// scan bootcore uses; note the findCore declared above is stale and
+// matches no definition in the tree, so do not try to use it.
+int find_core_rbf(const char *coreName, char *out, int outsz);
+
 extern char bootcoretype[64];
 extern int16_t btimeout;
 

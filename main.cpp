@@ -36,6 +36,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "scheduler.h"
 #include "osd.h"
 #include "offload.h"
+#include "support/physcd/physcd_autoboot.h"
 
 const char *version = "$VER:" VDATE;
 
@@ -102,6 +103,11 @@ int main(int argc, char *argv[])
 
 	FindStorage();
 	user_io_init((argc > 1) ? argv[1] : "",(argc > 2) ? argv[2] : NULL);
+
+	// phase B of disc autoboot: if the menu process loaded us because a
+	// disc was inserted, it left a marker. nothing to do otherwise, so a
+	// core the user loaded by hand is never hijacked.
+	physcd_autoboot_startup();
 
 #ifdef USE_SCHEDULER
 	scheduler_init();

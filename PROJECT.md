@@ -578,6 +578,38 @@ bias, and psx region detection (the core defaulted to US on a disc the
 user believes is EU - but the freeze happened before region detection
 could run, so that proves nothing yet).
 
+#### 2026-07-20: psx crash ROOT-CAUSED - upstream NULL deref, our name
+
+the fault handler's "SIGSEGV at address (nil)" plus elimination
+(megacd phys boots; psx chd boots; crash fires the instant mount_phys
+lands with the psx core loaded; companion disconnected changes
+nothing) led to file_io.cpp FileGenerateSavestatePath:
+
+    char *e = strrchr(fname, '.');
+    if (e) e[0] = 0;                      // NULL check guards this...
+    if(sufx) sprintf(e, "_%d.ss", sufx);  // ...but not these
+    else strcat(e, ".ss");
+
+every filename mister ever fed it had an extension, so e was never
+NULL - until the psx phys path substituted the disc's bare game id
+("SCES-01565", no slash, no dot) as the pseudo-filename. psx has
+savestates, so psx_mount_cd -> process_ss -> FileGenerateSavestatePath
+-> sprintf to NULL. megacd never takes the savestate path, which is
+why sonic cd boots from the same backend. chd survives because ".chd"
+supplies the dot. timing fits: the crash lands right after the ~26
+sector reads that extract the game id, a split second after the echo.
+
+fixed in file_io.cpp (append when no extension). this is a LATENT
+UPSTREAM BUG - any extensionless rom name crashes any savestate
+core - worth offering upstream independently of the fork.
+
+lesson, again: the "crash during startup, before the fifo read" theory
+from the truncated run-C log was wrong - that log was ambiguous
+(companion held the fifo; sequencing unclear) and I over-read it. the
+handler data (si_addr == exactly 0) + the elimination matrix the user
+ran (megacd-phys ok / psx-chd ok / psx-phys crash) was what actually
+localized it.
+
 ### phase 7: polish
 - scratched-disc watchdog behavior review (backend currently serves
   zeros after 3 retries so cores don't hang; verify cores tolerate it)

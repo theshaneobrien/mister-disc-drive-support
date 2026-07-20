@@ -610,6 +610,56 @@ handler data (si_addr == exactly 0) + the elimination matrix the user
 ran (megacd-phys ok / psx-chd ok / psx-phys crash) was what actually
 localized it.
 
+#### 2026-07-20: X-FILES BOOTS FROM PHYSICAL DISC - phase 6.1 met
+
+SCES-01565 (pal) boots first try on the psx core once the savestate
+NULL deref is fixed. the 150-sector bias, the inclusive-end toc
+transform and the game-id-as-filename substitution are all validated
+by that boot. still to check on this disc: cdda audio and the BAD
+count in /tmp/physcd_stats.log.
+
+#### 2026-07-20: adversarial review of the whole fork diff
+
+22 agents over 4 dimensions (psx path, backend concurrency, megacd
+regressions, name-shape sweep), every finding independently attacked
+before being believed: 12 confirmed, 3 refuted. the important one was
+found by FOUR reviewers independently and is a defect I introduced in
+the very fix that stopped the freeze:
+
+  the bounded sync-miss path stamped s->lba on its zero-filled slots.
+  a stamped slot is indistinguishable from a good one - the prefetch
+  scan only targets slots whose lba does NOT match, and s->bad was
+  written but never read by anything. so one transient 3s timeout
+  condemned 8 sectors to serve zeros for the REST OF THE MOUNT, on a
+  perfectly readable disc, counted as cache HITS so the stats hid it.
+  my comment promising the prefetcher would retry them described code
+  that did not exist. worse on a bridge that passes the one-sector
+  subchannel probe but rejects multi-sector-with-sub: the downgrade
+  that would have caught it sat AFTER the sync early-return, so every
+  sync fill would have failed and poisoned its slots.
+
+fixed in a54360d (sync path claims nothing; zeros served once,
+uncached; cursor left on the failed lba so the background ladder
+re-reads it) and d035c1f (the rest):
+  - physcd_load_toc n==0 guard: a drive answering trk0 > trk1 wrote
+    tracks[-1], ~450 bytes before the caller's toc_t
+  - physcd_read_sector always defines dst now; megacd ReadCDDA ignores
+    the return value and shipped uninitialised stack to the fpga at
+    leadout
+  - physcd_read_sector_sub: sub validity is PER SECTOR, not per disc -
+    retry/cooked-fallback sectors carry no subchannel, and ReadSubcode
+    was interleaving those zeros as if they were real subcode
+  - failed phys mounts leaked the fd, prefetch thread and 9.5MB cache
+    in three places (toc.phys unset, so Unload never released it)
+  - mount_phys needed a terminator check
+accepted as-is: telemetry counters race between threads (diagnostic
+only). refuted and NOT changed: three load_toc/prefetch race theories.
+
+lesson worth keeping: the bug was in the fix for the previous bug, in
+code I had reasoned about carefully and written a confident comment
+about. the comment was the tell - it asserted behaviour no code
+implemented. cheap to check, and nobody had checked.
+
 ### phase 7: polish
 - scratched-disc watchdog behavior review (backend currently serves
   zeros after 3 retries so cores don't hang; verify cores tolerate it)

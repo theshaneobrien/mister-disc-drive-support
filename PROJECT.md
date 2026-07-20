@@ -1150,50 +1150,62 @@ against `physcd_probe /dev/sr0 4` and `2` on the pal sonic cd.
 - osd feedback: Info() popup on disc detect ("physcd: PSX disc
   detected") is a two-line add in the daemon-adjacent main code
 
-### phase 8: retroachievements coexistence
+### phase 8: retroachievements version (SECOND RELEASE, decided 2026-07-20)
 
-why it is a phase and not a setting: the mister RA stack installs its
-own Main_MiSTer fork AS /media/fat/MiSTer - the same binary slot as
-ours. you cannot run both. see section 6c for how that stack is built;
-this is the task list.
+RA is gateware-bound: it only works on odelot's PATCHED rbfs, which push
+core ram to ddram at 0x3D000000 for rcheevos to read each frame. stock
+rbfs publish nothing there, so no stock-rbf binary can ever earn
+achievements - it is not a software choice. so we ship TWO releases, not
+one binary that tries to do both:
 
-1. **merge.** `git remote add odelot <fork>`, merge into `physcd`,
-   resolve. both are gpl forks of the same upstream. expected overlap
-   is near zero: they hook the main loop / ddram / user_io, we touch
-   megacd cdd internals + support/physcd + one fifo command. do this
-   merge FIRST and keep it rebased - the longer both forks drift, the
-   worse it gets.
-2. **verify nothing regressed.** cue and chd games must still work on
-   the merged binary, and RA must still fire on file-backed games.
-   this is the regression floor before any physical work.
-3. **rbf/launcher side: expected to need nothing.** RA symlinks
-   _Console launcher paths at _RA_Cores builds, and physcdd resolves
-   cores through _Console, so with RA active the daemon should load
-   the RA core automatically. the RA megacd rbf keeps the MEGACD
-   corename, so is_megacd() and mount_phys work unchanged. VERIFY,
-   don't assume.
-4. **the actual work: achievement identification.** rcheevos hashes cd
-   games by reading early disc sectors through a cdreader abstraction
-   (open_track / read_sector / close_track function pointers), NOT by
-   hashing an image file - which is lucky, because a physical mount
-   has no file. register a cdreader backed by physcd_read_sector when
-   the filename is the physcd sentinel; the sectors it wants are
-   already in our cache. verify the exact struct/callback names
-   against odelot's vendored rcheevos copy rather than trusting this
-   description. sega cd and saturn hash the disc header near the start
-   of the data track (easy); psx must locate its boot executable via
-   iso9660 (needs the phase 6 item 3 reader).
+- v1 "MiSTer (disc)"    = upstream Main_MiSTer + physcd. stock rbfs, zero
+  odelot dependency, minimal diff. DONE - this is the `physcd` branch.
+- v2 "MiSTer (disc+RA)" = odelot's fork + physcd + one RA-only file.
+  needs odelot's patched rbfs (from the manyhats-mike installer, which
+  swaps the binary at boot - drop our v2 MiSTer over odelot's after).
 
-acceptance: on one merged binary - (a) a cue/chd game still earns
-achievements, proving no regression; (b) a physical disc boots on the
-RA megacd core AND starts an RA session with the correct game
-identified; (c) an achievement actually triggers from physical media.
+this is NOT the "two-binary retreat" an earlier draft called it: since
+RA needs patched rbfs anyway, splitting is just honest packaging. the
+old "merge into one coexisting binary" plan is dropped.
 
-fallback if the merge turns ugly: ship two binaries and a switcher
-script (MiSTer vs MiSTer_RA), which is what the physical-disc prior
-art does for its own routing. strictly worse - two builds to maintain,
-no achievements when using physical discs - so treat it as a retreat,
-not a plan.
+branch model - one change-set, two bases:
+  physcd     = physcd commits on upstream/master             -> v1
+  physcd-ra  = SAME physcd commits replayed on odelot/master
+               (`git rebase --onto odelot/master origin/master`)
+               + the ra_cdreader_chd repoint commit           -> v2
+a physcd fix is written on `physcd`, cherry-picked to `physcd-ra`. an
+odelot release = fetch + rebase physcd-ra onto it. shared = the whole
+physcd backend + per-core mount branches; v2-only = the cdreader repoint.
+
+core intersection (odelot RA vs our physcd cores, verified 2026-07-20):
+PSX + Sega CD mature, Saturn + PCE-CD + NeoGeo CD wired but unproven by
+players, 3DO has NO RA core. so every physcd core except 3DO has a path.
+
+the v2 task list:
+1. **stand up physcd-ra + regression floor.** add the odelot remote,
+   rebase --onto, get it BUILDING. verify cue/chd games still earn
+   achievements and stock file-backed RA still fires. do this first and
+   rebase often - odelot ships ~weekly (v1.8.0, 31 releases in 3 months).
+2. **verify the patched rbf still speaks our cd protocol.** our backend
+   answers UIO_CD_GET over spi regardless of rbf; odelot's rbf patches
+   add ram-mirroring, not cd changes, so it SHOULD be untouched - but
+   confirm per core, it is the #1 unknown.
+3. **the actual work: point the hash reader at the disc.** rcheevos
+   hashes cd games ONCE at load through its rc_hash cdreader abstraction
+   (open_track / read_sector(sector#,bytes) / close_track) - odelot
+   already overrides it in `ra_cdreader_chd.cpp` via
+   rc_hash_init_custom_cdreader. add a branch: when the path is
+   PHYSCD_SENTINEL, install a cdreader whose read_sector calls
+   physcd_read_sector (sector-addressed = 1:1; the early sectors are
+   already in our cache). sega cd hashes the data-track header (we
+   already read that for region detect); psx locates its boot exe via
+   iso9660 (physcd_disc_serial already does this). RA never touches the
+   disc during play - only this one hash read - so no streaming needed.
+
+acceptance (v2): (a) a cue/chd game still earns achievements on the v2
+binary; (b) a physical disc boots the RA core AND starts an RA session
+with the right game identified; (c) an achievement fires from physical
+media. first target: sega cd (easiest hash, proven RA), then psx.
 
 ## 6. risks and mitigations
 
@@ -1208,7 +1220,7 @@ not a plan.
 | aging/rotting discs read marginally, esp. outer edge | backend zero-fills after retries so the core never hangs, and COUNTS it (stats `BAD`) so it can't masquerade as a clean read. DONE 2026-07-20: speed capped at 4x instead of requesting maximum (see below). further idea if BAD is still nonzero: drop to 2x adaptively once it goes up |
 | upstream drift | keep all changes behind toc.phys / sentinel; rebase quarterly |
 | neogeo needs iso9660 | prefer tiny userspace iso9660 reader over kernel module to keep "stock kernel" property; the same reader is needed for psx achievement hashing, so it pays for itself twice |
-| RA fork and our fork claim the same /media/fat/MiSTer slot | merge the two forks (phase 8), do it early and rebase often; two-binary switcher only as a retreat |
+| RA fork and our fork claim the same /media/fat/MiSTer slot | ship a SEPARATE v2 release = physcd commits replayed on odelot's fork (phase 8); v1 stays stock-rbf and odelot-free. not coexistence in one binary - RA needs patched rbfs anyway |
 
 ## 6b. drive compatibility (design position)
 
@@ -1232,33 +1244,33 @@ media (different read path, not implemented - cd media only).
 multiple drives: autodetect prefers the one with media, `mount_phys
 <n>` pins /dev/srN.
 
-## 6c. retroachievements coexistence (background for phase 8)
+## 6c. retroachievements stack (background for phase 8)
 
-the mister RA stack (manyhats-mike/mister-fpga-retroachievements,
-installed via mister companion) = odelot's fork of Main_MiSTer (reads
-core ram over ddram each frame, evaluates rcheevos) + patched rbf per
-system, installed AS /media/fat/MiSTer. that is the same binary slot
-as our fork: you cannot run both, so coexistence means MERGING the two
-main forks (both gpl forks of the same upstream). our diff surface was
-kept deliberately small for exactly this: expected overlap is near
-zero (they touch main-loop/ddram/user_io hooks; we touch megacd cdd
-internals, support/physcd, one fifo command).
+the mister RA stack (manyhats-mike/mister-fpga-retroachievements) =
+odelot's fork of Main_MiSTer (reads core ram over ddram each frame,
+evaluates rcheevos) + a PATCHED rbf per system that pushes ram to ddram
+at 0x3D000000. it installs AS /media/fat/MiSTer (same slot as ours), so
+the RA release is odelot's fork WITH our physcd changes replayed on top
+- see phase 8 for the two-release decision and branch model. our diff
+surface was kept small exactly for this: expected overlap is near zero
+(they add achievements_*.cpp / ra_*.cpp + main-loop/ddram/user_io hooks;
+we touch per-core cdd read paths, support/physcd, one fifo command).
 
-plan when wanted:
-1. git remote add odelot's fork, merge into physcd branch, resolve.
-2. rbf side: RA installs symlinks so _Console launcher paths point at
-   _RA_Cores builds - our daemon's newest-rbf scan follows _Console,
-   so with RA active it would load the RA core automatically. RA
-   megacd rbf keeps the MEGACD corename, so is_megacd()/mount_phys
-   work unchanged.
-3. the real work: achievement identification. rcheevos hashes cd games
-   by reading early disc sectors through its cdreader abstraction (not
-   by hashing the whole image file). physical mounts have no file, so
-   odelot's hash path must be pointed at physcd_read_sector when the
-   filename is the physcd sentinel - the needed sectors are already in
-   our cache. megacd hashing reads the header region of the data
-   track; feasible. until that's wired, physical boots on a merged
-   binary would play fine but start no RA session.
+verified facts (2026-07-20, against odelot's source):
+- RA needs the patched rbf; stock rbfs earn nothing (gateware, no
+  software workaround). this is why v1 (stock) and v2 (RA) are separate.
+- odelot already overrides rcheevos' cdreader in `ra_cdreader_chd.cpp`
+  (rc_hash_init_custom_cdreader; open_track / read_sector(sector#,bytes)
+  / close_track). our seam = a sibling cdreader that reads the physical
+  drive when the path is the sentinel. read_sector is sector-addressed,
+  so it maps 1:1 onto physcd_read_sector, and the early sectors are
+  already in our cache.
+- RA reads the disc ONLY at load (to hash); gameplay reads core ram over
+  ddram. so we satisfy one hash read, never a stream.
+- every physcd core except 3DO has RA code; PSX + Sega CD are proven,
+  the rest are new. autoboot (now in main, physcdd retired) resolves the
+  RA core through _Console the same as any other, so it should load
+  unchanged - VERIFY per core.
 
 ## 7. explicit non-goals
 

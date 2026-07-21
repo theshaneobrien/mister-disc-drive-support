@@ -146,7 +146,7 @@ void physcd_autoboot_startup(void)
 {
 	int want = 0;
 
-	// acoustic seek prototype: start its background thread if the ini asks.
+	// acoustic seek: start its background thread if the ini asks.
 	// runs once per process; harmless when off.
 	physcd_acoustic_config(cfg.physcd_acoustic);
 

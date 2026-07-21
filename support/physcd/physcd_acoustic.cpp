@@ -1,5 +1,5 @@
 /*
- * physcd_acoustic.cpp - acoustic seek (prototype). see physcd_acoustic.h.
+ * physcd_acoustic.cpp - acoustic seek. see physcd_acoustic.h.
  *
  * we already know the lba an image-backed game is reading (the chd read path
  * hands it to physcd_acoustic_hint), so mirror those positions onto a real
@@ -328,17 +328,24 @@ static void *acoustic_thread(void *arg)
 		if (gap > 120.0) gap = 120.0;
 
 		// spin the motor UP under load and DOWN when light by ramping the
-		// drive's target speed with intensity. stepped + debounced so it is an
-		// audible ramp, not a flutter. (1x CD = 75 sectors/s, so heavy load
-		// pushes rate well past SPEED_MAX*12.)
-		int want = SPEED_MIN + (int)(rate / 12);
-		if (want > SPEED_MAX) want = SPEED_MAX;
-		want = (want / SPEED_STEP) * SPEED_STEP;
-		if (want < SPEED_MIN) want = SPEED_MIN;
-		if (want != cur_speed && now - last_speed_ms >= SPEED_DEBOUNCE_MS) {
-			set_speed(ac.fd, want);
-			cur_speed = want;
-			last_speed_ms = now;
+		// drive's target speed with intensity. only in the read tier - the
+		// seek-only fallback is meant to be quiet clicking, not spinning. the
+		// target glides one step per debounce with a full-step deadband, so it
+		// does not snap or warble on a boundary. (1x CD = 75 sectors/s.)
+		if (!ac.read_unsupported) {
+			double target = SPEED_MIN + rate / 12.0;
+			if (target > SPEED_MAX) target = SPEED_MAX;
+			int want = cur_speed;
+			if (cur_speed < SPEED_MIN) want = SPEED_MIN;                // up from the reset floor
+			else if (target >= cur_speed + SPEED_STEP) want = cur_speed + SPEED_STEP;
+			else if (target <= cur_speed - SPEED_STEP) want = cur_speed - SPEED_STEP;
+			if (want > SPEED_MAX) want = SPEED_MAX;
+			if (want < SPEED_MIN) want = SPEED_MIN;
+			if (want != cur_speed && now - last_speed_ms >= SPEED_DEBOUNCE_MS) {
+				set_speed(ac.fd, want);
+				cur_speed = want;
+				last_speed_ms = now;
+			}
 		}
 
 		int lba = map_lba(ac.target_lba);
@@ -414,7 +421,7 @@ void physcd_acoustic_config(int enabled)
 			printf("physcd_acoustic: could not start thread\n");
 			return;
 		}
-		printf("physcd_acoustic: enabled (prototype) - put a data prop disc in the drive\n");
+		printf("physcd_acoustic: enabled - put a spare data disc in the drive\n");
 	}
 }
 

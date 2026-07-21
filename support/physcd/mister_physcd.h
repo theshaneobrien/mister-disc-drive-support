@@ -46,7 +46,7 @@ int physcd_disc_present();
 int physcd_media_changed();
 
 // true while physcd holds the drive (watching or a game disc mounted), so the
-// acoustic seek prototype can stay off the drive whenever physcd wants it.
+// acoustic seek can stay off the drive whenever physcd wants it.
 int physcd_drive_busy();
 
 // build a mister toc_t from the drive TOC. sets toc->phys = 1,

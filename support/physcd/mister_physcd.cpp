@@ -733,7 +733,7 @@ int physcd_media_changed()
 }
 
 // true while physcd holds the drive (watching at the menu, or a game disc
-// mounted). the acoustic seek prototype uses this to stay off the drive
+// mounted). the acoustic seek feature uses this to stay off the drive
 // whenever physcd wants it.
 int physcd_drive_busy()
 {
@@ -1232,7 +1232,7 @@ const char *physcd_disc_name(physcd_disc_t t)
 int physcd_watch_start(void)
 {
 	/* the menu is about to open the drive to watch for a disc, so make the
-	   acoustic prototype let go of it first (it only runs for image games) */
+	   acoustic seek let go of it first (it only runs for image games) */
 	physcd_acoustic_pause();
 	if (physcd_open(NULL)) return -1;
 	pcd.ev = (int)PHYSCD_EV_NONE;

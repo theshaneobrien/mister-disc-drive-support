@@ -2,7 +2,7 @@
 #define PHYSCD_ACOUSTIC_INCLUDED
 
 /*
- * acoustic seek (prototype).
+ * acoustic seek.
  *
  * give image-backed (chd/cue) games the SOUND of a real drive. we already
  * know the lba a game is reading - the chd read path hands it to us - so

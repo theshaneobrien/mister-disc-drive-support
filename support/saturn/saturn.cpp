@@ -51,7 +51,18 @@ void saturn_poll()
 	   new toc and re-scans. (a bare STOP was hardware-proven insufficient.) */
 	static uint32_t swap_close_at = 0;
 	if (satcdd.is_phys() && physcd_swap_consume() && satcdd.SwapPhys())
+	{
+		/* every mount - including the proven no-reset OSD swap - pushes the
+		   disc's ip.bin boot header to the core (BOOT_IO_INDEX); the bios
+		   disc-change validation consults it, and a stale header reads as
+		   "wrong disc" and dumps the guest into the cd player (hardware-
+		   observed on Policenauts). one bounded sector read, during the lid
+		   dwell so the header is in place before the guest sees STOP. */
+		static uint8_t hdr[256];
+		if (satcdd.GetBootHeader(hdr) > 0)
+			saturn_send_data(hdr, 256, BOOT_IO_INDEX);
 		swap_close_at = GetTimer(PHYSCD_SWAP_DWELL_MS);
+	}
 	if (satcdd.is_phys() && swap_close_at && CheckTimer(swap_close_at))
 	{
 		swap_close_at = 0;

@@ -612,7 +612,7 @@ void cfg_parse()
 	cfg.hdr_max_nits = 1000;
 	cfg.hdr_avg_nits = 250;
 	cfg.physcd_autoboot = 1;	// this is the physcd fork; on is the point of it
-	cfg.physcd_mount_delay = 2;
+	cfg.physcd_mount_delay = 2;	// seconds to let the core settle before mounting
 	cfg.physcd_acoustic = 0;	// prototype, off unless asked for
 	strcpy(cfg.physcd_audio_core, "PSX");	// audio cd -> PSX bios cd player by default
 	cfg.video_brightness = 50;

@@ -6288,7 +6288,9 @@ int input_test(int getchar)
 					{
 						// swap_phys - after physically swapping the disc in a
 						// multi-disc game, hand the new disc to the running core
-						// with no reset so the game continues. PSX only for now.
+						// with no reset so the game continues. the cd cores
+						// auto-detect physical swaps; this manual command is a
+						// PSX-only fallback.
 						physcd_swap_current_core();
 					}
 				}

@@ -40,13 +40,6 @@ extern const char *getRootDir();
 static unsigned long pending_mount = 0;
 static physcd_disc_t pending_type = PHYSCD_DISC_NONE;
 
-/*
- * disc type -> core name for findCore.
- *
- * this is the rbf BASENAME and findCore is CASE-SENSITIVE, so it must
- * not be the uppercase string the is_*() helpers compare against:
- * "MEGACD" finds nothing, "MegaCD" finds MegaCD_20240101.rbf.
- */
 /* which console's bios cd player an audio cd boots into. PHYSCD_AUDIO_CORE
    (default PSX) lets people pick - PSX is the verified one (its bios cd
    player is confirmed working); the others are plumbed but their bios cd
@@ -64,6 +57,13 @@ static physcd_disc_t physcd_audio_console(void)
 	return PHYSCD_DISC_PSX;
 }
 
+/*
+ * disc type -> core name for findCore.
+ *
+ * this is the rbf BASENAME and findCore is CASE-SENSITIVE, so it must
+ * not be the uppercase string the is_*() helpers compare against:
+ * "MEGACD" finds nothing, "MegaCD" finds MegaCD_20240101.rbf.
+ */
 static const char *core_name_for(physcd_disc_t t)
 {
 	switch (t) {
@@ -164,11 +164,13 @@ int physcd_mount_current_core(void)
 
 int physcd_swap_current_core(void)
 {
-	// re-read the disc now in the drive and hand it to the running game as a
-	// swap (no reset). PSX only for now - the swap signalling is per core.
+	// manual fallback for the swap_phys fifo: re-read the disc now in the
+	// drive and hand it to the running game as a swap (no reset). every
+	// swap-capable core auto-detects a physical swap in its poll; only PSX
+	// is also wired to this manual command.
 	if (is_psx()) { psx_swap_disc(); return 1; }
 
-	printf("physcd: disc swap not supported on '%s' yet\n", user_io_get_core_name());
+	printf("physcd: swap_phys is a PSX-only manual path; '%s' auto-detects physical swaps if it supports them\n", user_io_get_core_name());
 	return 0;
 }
 

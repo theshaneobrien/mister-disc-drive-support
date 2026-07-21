@@ -38,6 +38,7 @@
 #define BURST 16                      /* sectors per drive transaction  */
 #define PREWARM_SECTORS 768           /* cold-start spin-up read (~10s)  */
 #define STATS_MS 5000
+#define SWAP_CHECK_MS 500             /* eject/insert poll interval - NOT the tray dwell; equals PHYSCD_SWAP_DWELL_MS only by coincidence */
 
 /*
  * a cache miss is serviced ON THE MAIN THREAD, which is also the thread
@@ -614,7 +615,7 @@ static void *prefetch_thread(void *arg)
 		   keep the block armed while an eject is pending or we would never
 		   retry and the read path would serve zeros forever. */
 		if (pcd.swap_enable && (pcd.leadout > 0 || swap_ejected)
-		    && now_ms() - last_swap_check >= 500) {
+		    && now_ms() - last_swap_check >= SWAP_CHECK_MS) {
 			last_swap_check = now_ms();
 			int present = physcd_disc_present();
 			if (swap_was_present == 1 && !present) {
@@ -646,7 +647,7 @@ static void *prefetch_thread(void *arg)
 					printf("physcd: disc swap - new toc loaded\n");
 				}
 				/* load failed (drive not settled): swap_ejected stays set, the
-				   gate above keeps retrying every 500ms until it reads */
+				   gate above keeps retrying every SWAP_CHECK_MS until it reads */
 			}
 			swap_was_present = present;
 		}
@@ -858,8 +859,6 @@ int physcd_drive_busy()
 	return pcd.fd >= 0;
 }
 
-// arm/disarm mid-mount disc-swap detection. the core calls this on a physical
-// mount so the prefetch thread watches for an eject-then-insert.
 int physcd_swap_ejected(void)
 {
 	/* mid-swap window: the disc is physically out (or back in but its toc not
@@ -868,6 +867,8 @@ int physcd_swap_ejected(void)
 	return pcd.swap_enable && pcd.swap_ejected;
 }
 
+// arm/disarm mid-mount disc-swap detection. the core calls this on a physical
+// mount so the prefetch thread watches for an eject-then-insert.
 void physcd_swap_enable(int enable)
 {
 	pcd.swap_enable = enable ? 1 : 0;

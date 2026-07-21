@@ -409,10 +409,11 @@ int satcdd_t::Load(const char *filename)
 /* adopt a disc that was physically swapped mid-mount. the physcd backend has
    already re-read the new disc's toc on its prefetch thread and invalidated
    the cache; this pulls that CACHED toc (physcd_current_toc = NO drive read,
-   safe on the poll/fpga thread) and swaps it in, then emits the disc-change
-   STOP transition (lid_open=false, stop_pend=true) that Load's tail uses - the
-   next Process() sends SATURN_STAT_STOP carrying the new toc, the same
-   transition the proven reset-off OSD swap produces. no Reset (keeps
+   safe on the poll/fpga thread) and swaps it in with the lid held OPEN and
+   stop_pend armed (the lid normally opened in real time already, via SwapOpen
+   at the physical eject). the caller closes the lid after the dwell via
+   SwapClose, whose next Process() sends SATURN_STAT_STOP carrying the new toc
+   off a full lid cycle - see the transition comment below. no Reset (keeps
    SendData), no Unload (would physcd_close the live drive), backup untouched. */
 int satcdd_t::SwapPhys()
 {

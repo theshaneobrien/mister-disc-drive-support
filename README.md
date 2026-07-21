@@ -1,36 +1,47 @@
 # MiSTer USB CDROM Loader
 
-Load MegaCD and PlayStation games on a MiSTer straight from a USB CD or DVD drive, no ripping. Put a disc in, play it.
+Load almost any CD game on a MiSTer straight from a USB CD or DVD drive, no ripping. Put a disc in, play it. And if you want, earn RetroAchievements off the physical disc while you are at it.
 
-This is a fork of Main_MiSTer, the ARM/Linux side of MiSTer. All the work is in userspace. Cores and RBF files stay stock, the FPGA never touches the drive. The ARM binary just answers the core's sector requests from the real disc instead of from a file on the SD card.
+This is a fork of Main_MiSTer, the ARM/Linux side of MiSTer. All the work is in userspace and the FPGA never touches the drive. On the plain disc build the cores stay stock too. The RetroAchievements build uses RA's patched cores, but the disc side is identical. Either way the ARM binary just answers the core's sector requests from the real disc instead of from a file on the SD card.
 
 ## Heads up, this was written with AI
 
-Most of the code here was written with an AI assistant (Claude), with me steering it, reviewing every change, and testing on real hardware. I am not hiding that. It boots real games and it has been through adversarial code review, but treat it like any hobby fork: keep your working MiSTer binary as a backup before you swap this one in.
+Most of the code here was written with an AI assistant (Claude), with me steering it, reviewing every change, and testing on real hardware. I am not hiding that. It boots real games, it has earned achievements off a spinning disc, and it has been through adversarial code review. Still, treat it like any hobby fork: keep your working MiSTer binary as a backup before you swap this one in.
+
+## Two versions, pick one
+
+There are two builds on the releases page:
+
+* **Disc.** Plain physical disc support on stock cores. Nothing but the loader.
+* **Disc plus RetroAchievements.** The same disc support, merged into the MiSTer RetroAchievements build (odelot's fork and its patched cores). Achievements fire from the physical disc. Grab this one if you use RA.
+
+Both do the disc side exactly the same. The only difference is whether RetroAchievements comes along for the ride.
 
 ## What works
 
 * MegaCD, PlayStation, Saturn, NeoGeo CD, and 3DO games boot and play from disc, CD audio tracks included where the core supports them.
 * The disc is identified automatically, so the right core loads for whatever you put in.
+* RetroAchievements straight from the disc, on the RA build, for the cores RA supports (MegaCD, PlayStation, Saturn, PC Engine CD, NeoGeo CD). The disc is read once at load, hashed, and matched to the RA database exactly like an image would be. I have earned achievements on PS1 games with nothing but the disc in the drive.
 * Region is handled per core, see the Region section below.
 * Autoboot. Drop a disc in at the menu and it loads the right core and mounts the disc, hands free.
 * Manual mode. A Play row at the bottom of the core list, so you load a disc when you want instead of on insert.
 
-PC Engine CD and swapping discs mid game are not done yet. CD-i is another CD core that could be added the same way if there is interest. This does what the list above says and nothing more.
-
-Some things are deliberately out of scope. Dreamcast uses GD-ROM, a proprietary high density format that normal CD and DVD drives cannot read, so it is not possible with this hardware. ao486 (DOS/Windows PC) is a different flow, you install a game to the hard drive from the disc rather than booting it, so it is more of an "attach the drive to the core" job than "put a disc in and play" and is left for later.
+PC Engine CD and CD-i can be added the same way, I just have no discs to test with. Swapping discs mid game works, but it is untested for the games that actually need it.
 
 ## What you need
 
-* A MiSTer (DE10-nano) on current stock firmware. No kernel changes, no FPGA changes.
-* A USB CD or DVD drive. Most drives that show up as /dev/sr0 will work. There is a small probe tool (physcd_probe) you can run on the MiSTer to check a drive before you trust it.
+* A MiSTer. I have only tested on a DE10-nano. No kernel changes, no FPGA changes.
+* A USB CD or DVD drive. Most drives that show up as /dev/sr0 will work. There is a small probe tool (physcd_probe) you can run on the MiSTer to check a drive before you trust it. The two I have tested and can vouch for:
+  * Hitachi LG GP60NB60, https://www.amazon.co.uk/dp/B01G33IRYS
+  * LIUAN External CD DVD Drive, model B0260, https://www.amazon.co.uk/dp/B0BB6YCHK4
 * A decent power supply for the drive. This one really matters. A CD drive pulls a big gulp of current when it spins up for a seek, and the DE10-nano's own USB or a cheap unpowered hub will sag under it. When that happens the drive falls off the USB bus mid game, and everything else on that hub, controllers included, goes quiet for a minute until it recovers. Use a powered hub, and ideally give the drive its own supply. If you ever see a game freeze for a minute and then carry on by itself, that is power, not the software.
 
 ## Setup
 
-1. Build the binary (see Building) and copy it to /media/fat/MiSTer. Save your old one as MiSTer.bak first.
-2. For MegaCD region matching, drop your BIOS files into the MegaCD home folder as boot_EU.rom, boot_US.rom, and boot_JP.rom. A plain boot.rom still works as a catch all. A PAL disc running on a US BIOS will play but stutter, so this is worth setting up.
-3. Reboot.
+1. Grab the binary from the releases page, Disc or Disc plus RetroAchievements. Back up your current /media/fat/MiSTer first, then drop the new one in its place and reboot.
+2. Set each CD core's Region to Auto where it has the option, see Region below.
+
+On BIOS files, I did not touch any of mine. It all just worked, set up through MiSTer Companion. If your CD cores already run ripped games then the BIOS files are already where they need to be, so stick with what you have. People running a MiSTer tend to know their own setup best.
 
 ## Region
 
@@ -43,13 +54,13 @@ A disc and the console BIOS have to agree on region or a game either refuses to 
 
 Short version: if a core has an Auto region setting, use it. Otherwise provide the region named BIOS files above.
 
-Each CD core needs its own BIOS in that core's home folder, same as you would for a ripped image: MegaCD boot.rom, PlayStation BIOS, Saturn boot.rom, and a NeoGeo CD BIOS (uni-bioscd.rom, or top-sp1.bin / neocd.bin).
+Each CD core needs its own BIOS in that core's home folder, same as you would for a ripped image: MegaCD boot.rom, PlayStation BIOS, Saturn boot.rom, and a NeoGeo CD BIOS (uni-bioscd.rom, or top-sp1.bin and neocd.bin).
 
 ## Using it
 
 Drive plugged in, disc inside:
 
-* Autoboot on (the default): insert a disc at the menu, it works out the game, loads the core, and mounts the disc. Nothing to press.
+* Autoboot on, the default: insert a disc at the menu, it works out the game, loads the core, and mounts the disc. Nothing to press. A disc left in the drive also relaunches on the next power on, so if you leave a game in, the MiSTer boots straight into it.
 * Manual: scroll to the bottom of the core list. There is a Play row showing the game and console, for example "Play: SONIC CD - Mega CD". Select it to boot. With no disc in the drive it reads "Insert Disc". PlayStation discs with no readable title show their serial instead, like SLES-01234.
 
 For scripts there is a command on the fifo:
@@ -70,9 +81,17 @@ PHYSCD_MOUNT_DELAY=2  ; seconds to let a core settle before mounting, raise it i
 PHYSCD_DEVICE=        ; optional, pin one drive such as /dev/sr1, blank means autodetect
 ```
 
+## RetroAchievements
+
+The RA build is the disc loader dropped into the MiSTer RetroAchievements setup, so it wants the RA patched cores, not stock ones. The easy way in is MiSTer Companion, which installs odelot's binary and the patched cores into _RA_Cores. Install that first, then drop the Disc plus RetroAchievements binary over /media/fat/MiSTer. When it boots a disc the loader prefers the patched core from _RA_Cores, so achievements can actually fire.
+
+One real limit worth knowing. RetroAchievements matches a game by hashing the disc, and that hash has to match the set in the RA database, which is built against the unmodified retail disc. Retail discs that RA already supports work. Anything that needs a patch to get its achievements will not match from a physical disc, because we read the disc exactly as pressed and cannot change it. Europe Sonic CD is one of those, its set needs a patch, so it will not identify off the disc.
+
+Set the core Region to Auto, same as always. Softcore is the easy way to confirm a game identifies. Hardcore is stricter but works fine once the game is recognised.
+
 ## It is a fork, and it stays one
 
-Upstream MiSTer has said they will not support USB CD drives, so this is never getting folded back in. It is a permanent fork. It follows Main_MiSTer loosely and will lag behind at times. If you need a newer main feature you may have to rebase it yourself. The changes are kept small and tucked behind a physcd flag on purpose, so rebasing is not too painful.
+Upstream MiSTer has said they will not support USB CD drives, so this is probably never getting folded back in. It is a fork and it will stay one. It follows Main_MiSTer loosely and will lag behind at times. If you need a newer main feature you may have to rebase it yourself. The changes are kept small and tucked behind a physcd flag on purpose, so rebasing is not too painful.
 
 ## Building
 
@@ -84,8 +103,16 @@ On Windows:
 .\tools\build.ps1
 ```
 
-The binary lands in Main_MiSTer\bin\MiSTer. The fork code is on the physcd branch.
+The binary lands in Main_MiSTer\bin\MiSTer. The disc build is on the physcd branch, the RetroAchievements build on physcd-ra.
 
 ## How it fits together
 
-The backend lives in support/physcd. It reads raw 2352 byte sectors from the drive over SG_IO, keeps a prefetch cache split into two streams (game data and CD audio) so mixed mode discs do not stall, and hides real seek latency behind the timing the cores already model for themselves. Per core the change is tiny: one branch in the read path that pulls from the drive instead of a file, plus the region and BIOS handling. It is all guarded, so normal cue and chd loading behaves exactly as it did before.
+The backend lives in support/physcd. It reads raw 2352 byte sectors from the drive over SG_IO, keeps a prefetch cache split into two streams (game data and CD audio) so mixed mode discs do not stall, and hides real seek latency behind the timing the cores already model for themselves. Per core the change is tiny: one branch in the read path that pulls from the drive instead of a file, plus the region and BIOS handling. It is all guarded, so normal cue and chd loading behaves exactly as it did before. On the RA build one more branch points the RetroAchievements hash reader at the same physical sectors, so a disc identifies with no image file anywhere.
+
+## License
+
+physcd is a fork of [Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer), combined with code from [odelot's Main_MiSTer](https://github.com/odelot/Main_MiSTer) for the RetroAchievements build. Both are under the GNU General Public License, version 3 or, at your option, any later version. So this is too: GNU GPL v3 or later. The full text is in [LICENSE](LICENSE).
+
+Copyright (C) 2026 Shane O'Brien. Portions Copyright (C) 2005 to 2012 Dennis van Weeren, Jakub Bednarski, Till Harbaum, and the MiSTer-devel contributors.
+
+The MiSTer binary bundles a few third party libraries, each keeping its own license: rcheevos and miniz (MIT), libchdr and zstd (BSD, zstd also under GPLv2), imlib2 (permissive BSD style), the LZMA SDK, libco, and md5 (public domain), and the BlueZ bluetooth headers (GPL v2 family). Those stay governed by their own license files.

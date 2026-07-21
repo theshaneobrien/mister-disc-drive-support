@@ -23,6 +23,7 @@
 #include "../3do/3do.h"
 #include "mister_physcd.h"
 #include "physcd_autoboot.h"
+#include "physcd_acoustic.h"
 
 #ifdef HAS_RCHEEVOS
 // v2 (RA build): identify a physical disc for RetroAchievements and prefer
@@ -144,6 +145,10 @@ int physcd_mount_current_core(void)
 void physcd_autoboot_startup(void)
 {
 	int want = 0;
+
+	// acoustic seek prototype: start its background thread if the ini asks.
+	// runs once per process; harmless when off.
+	physcd_acoustic_config(cfg.physcd_acoustic);
 
 	/* NB: not gated on cfg.physcd_autoboot. autoboot=0 means "do not
 	   AUTO-load on insert", not "ignore the drive": the menu still

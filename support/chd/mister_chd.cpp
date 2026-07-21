@@ -8,6 +8,7 @@
 #include "../../file_io.h"
 #include "../../cd.h"
 #include "mister_chd.h"
+#include "../physcd/physcd_acoustic.h"
 
 void lba_to_hunkinfo(chd_file *chd_f, int lba, int *hunknumber, int *hunkoffset)
 {
@@ -162,6 +163,9 @@ chd_error mister_load_chd(const char *filename, toc_t *cd_toc)
 
 chd_error mister_chd_read_sector(chd_file *chd_f, int lba, uint32_t d_offset, uint32_t s_offset, int length, uint8_t *destbuf, uint8_t *hunkbuf, int *hunknum)
 {
+	// acoustic seek: mirror this read's position onto a real drive so it
+	// physically seeks. cheap and non-blocking, no-op unless PHYSCD_ACOUSTIC.
+	physcd_acoustic_hint(lba);
 
 	int tmphnum = 0;
 	int hunkofs = 0;

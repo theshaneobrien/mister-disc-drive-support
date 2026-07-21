@@ -45,6 +45,10 @@ int physcd_disc_present();
 // media-change poll (wraps CDROM_MEDIA_CHANGED); 1 if disc changed/ejected
 int physcd_media_changed();
 
+// true while physcd holds the drive (watching or a game disc mounted), so the
+// acoustic seek prototype can stay off the drive whenever physcd wants it.
+int physcd_drive_busy();
+
 // build a mister toc_t from the drive TOC. sets toc->phys = 1,
 // invalidates the sector cache and probes subchannel capability.
 // data track sector size is always reported as 2352 (raw reads).

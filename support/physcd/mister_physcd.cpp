@@ -26,6 +26,7 @@
 #include <limits.h>
 
 #include "mister_physcd.h"
+#include "physcd_acoustic.h"
 
 // ---------------------------------------------------------------- state
 
@@ -124,7 +125,7 @@ typedef struct {
 } phys_trk_t;
 
 static struct {
-	int fd;
+	volatile int fd;              /* read lock-free by the acoustic thread via physcd_drive_busy */
 	int leadout;                  /* nonzero only when a toc is live */
 	int first_data_lba;
 	int sub_ok;                   /* -1 unknown, 0 no, 1 yes        */
@@ -731,6 +732,14 @@ int physcd_media_changed()
 	return ioctl(pcd.fd, CDROM_MEDIA_CHANGED, CDSL_CURRENT) > 0;
 }
 
+// true while physcd holds the drive (watching at the menu, or a game disc
+// mounted). the acoustic seek prototype uses this to stay off the drive
+// whenever physcd wants it.
+int physcd_drive_busy()
+{
+	return pcd.fd >= 0;
+}
+
 // probe raw P-W subchannel support once per disc: only conclude "no"
 // when a plain read of the same sector succeeds where the sub read
 // failed (a scratched sector must not disable subchannel for good).
@@ -1222,6 +1231,9 @@ const char *physcd_disc_name(physcd_disc_t t)
 
 int physcd_watch_start(void)
 {
+	/* the menu is about to open the drive to watch for a disc, so make the
+	   acoustic prototype let go of it first (it only runs for image games) */
+	physcd_acoustic_pause();
 	if (physcd_open(NULL)) return -1;
 	pcd.ev = (int)PHYSCD_EV_NONE;
 	pcd.watch_mode = 1;
@@ -1244,6 +1256,11 @@ void physcd_watch_stop(void)
 	pthread_mutex_unlock(&pcd.lock);
 
 	physcd_close();
+
+	/* the drive is free again: a core is loading, so let acoustic have it for
+	   image-backed play (harmless if the core turns out to mount a real disc,
+	   physcd_drive_busy keeps acoustic off the drive in that case) */
+	physcd_acoustic_resume();
 }
 
 int physcd_watching(void)

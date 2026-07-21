@@ -65,33 +65,38 @@ void saturn_poll()
 	static unsigned long poll_timer = 0;
 	static uint8_t last_req = 255;
 
-	/* a physically-swapped disc: adopt its toc (cached, no drive read) and
-	   re-announce it. SwapPhys picks the transition by disc type: a GAME disc
-	   gets the silent OSD-style STOP (no open edge - a lid event makes the
-	   game summon the bios disc check, which parks at the cd player), an
-	   AUDIO disc gets the lid pulse the bios player needs to re-scan. */
+	/* physical disc swap, in REAL TIME like a real Saturn: the lid opens the
+	   moment the user ejects (the game's disc-change flow starts while they
+	   are still holding the disc), stays open through the swap, and closes
+	   only after the new disc's toc is loaded and its boot header pushed -
+	   the guest then sees STOP with the new toc off a properly-ordered lid
+	   cycle. (a compressed after-the-fact pulse sent the bios check to the
+	   player menu; a silent STOP was ignored outright - both hardware-tested.) */
 	static uint32_t swap_close_at = 0;
-	int sw = (satcdd.is_phys() && physcd_swap_consume()) ? satcdd.SwapPhys() : 0;
-	if (sw)
+	if (satcdd.is_phys())
 	{
-		/* every mount - including the proven no-reset OSD swap - pushes the
-		   disc's ip.bin boot header to the core (BOOT_IO_INDEX); the bios
-		   disc-change validation consults it, and a stale header reads as
-		   "wrong disc" (hardware-observed on Policenauts). pushed BEFORE the
-		   guest sees the new toc. also re-derive the per-game quirk flags
-		   like every OSD mount does. one bounded sector read. */
-		static uint8_t hdr[256];
-		if (satcdd.GetBootHeader(hdr) > 0)
+		if (physcd_swap_ejected()) satcdd.SwapOpen();
+		if (physcd_swap_consume() && satcdd.SwapPhys())
 		{
-			saturn_send_data(hdr, 256, BOOT_IO_INDEX);
-			saturn_apply_disc_hacks((const char*)hdr + 0x20);
+			/* every mount - including the proven no-reset OSD swap - pushes
+			   the disc's ip.bin boot header (BOOT_IO_INDEX); the bios disc
+			   validation consults it, and a stale header reads as "wrong
+			   disc" (hardware-observed). pushed while the lid is still open,
+			   so it is in place before the guest sees the new toc. also
+			   re-derive the per-game quirk flags like every OSD mount does. */
+			static uint8_t hdr[256];
+			if (satcdd.GetBootHeader(hdr) > 0)
+			{
+				saturn_send_data(hdr, 256, BOOT_IO_INDEX);
+				saturn_apply_disc_hacks((const char*)hdr + 0x20);
+			}
+			swap_close_at = GetTimer(PHYSCD_SWAP_DWELL_MS);
 		}
-		if (sw == 1) swap_close_at = GetTimer(PHYSCD_SWAP_DWELL_MS);   /* lid pulse: close later */
-	}
-	if (satcdd.is_phys() && swap_close_at && CheckTimer(swap_close_at))
-	{
-		swap_close_at = 0;
-		satcdd.SwapClose();
+		if (swap_close_at && CheckTimer(swap_close_at))
+		{
+			swap_close_at = 0;
+			satcdd.SwapClose();
+		}
 	}
 
 	if (!poll_timer || CheckTimer(poll_timer))

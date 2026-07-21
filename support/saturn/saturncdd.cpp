@@ -438,26 +438,24 @@ int satcdd_t::SwapPhys()
 	this->read_toc = false;
 	this->seek_ring = false;
 	this->seek_ring2 = false;
-	/* the disc-change transition depends on WHAT came in (hardware-tested):
-	   - GAME disc (track 1 = data): the silent OSD-image-swap transition -
-	     STOP with the new toc, NO open edge. a lid-open event obliges the
-	     running game to invoke the bios disc verification, which parks a
-	     different-disc insert at the cd player menu; the proven no-reset OSD
-	     swap never shows the guest an OPEN, and the game's own wait loop
-	     picks up the STOP + new toc (how Panzer Dragoon Saga swaps).
-	   - AUDIO disc: the lid pulse. the bios cd player only re-scans its
-	     track list off a lid event (hardware-confirmed), and a mid-game
-	     audio insert bouncing to the player is what a real Saturn does.
-	   returns 2 = silent game swap, 1 = lid pulse armed (caller must close
-	   via SwapClose after the dwell), 0 = toc not ready. */
-	if (this->toc.tracks[0].type != TT_CDDA) {
-		this->lid_open = false;
-		this->stop_pend = true;
-		return 2;
-	}
+	/* hardware settled the transition question: the silent OSD-style STOP is
+	   ignored outright by lid-watching games (Policenauts' insert-disc loop
+	   never issued a single read off it), so EVERY swap shows the lid. the
+	   lid normally opened in REAL TIME already (SwapOpen at the physical
+	   eject); assert it here too in case that edge was missed, and let the
+	   caller close it after the dwell - stop_pend then delivers STOP with the
+	   new toc, and the bios cd player re-scans off the same lid cycle. */
 	this->lid_open = true;
 	this->stop_pend = true;
 	return 1;
+}
+
+void satcdd_t::SwapOpen()
+{
+	/* the user physically ejected: show the guest the lid opening NOW, like a
+	   real Saturn - the game's disc-change flow starts while the user is still
+	   holding the disc, not via a compressed pulse after the new toc loads. */
+	this->lid_open = true;
 }
 
 void satcdd_t::SwapClose()

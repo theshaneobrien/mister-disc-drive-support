@@ -162,9 +162,10 @@ static struct {
 	volatile int last_win;        /* window of the most recent real read; -1 = none yet */
 	volatile int prewarm;         /* cold-start spin-up: next lba to pre-read; -1 = idle */
 	volatile int prewarm_end;     /* stop pre-reading at this lba */
+	volatile int swap_ejected;    /* mid-swap: disc physically out, new toc not loaded yet */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0 };
 
 static int track_of(int lba)
 {
@@ -618,6 +619,7 @@ static void *prefetch_thread(void *arg)
 			int present = physcd_disc_present();
 			if (swap_was_present == 1 && !present) {
 				swap_ejected = 1;                 /* disc pulled */
+				pcd.swap_ejected = 1;             /* let the core show the lid open in real time */
 			}
 			else if (swap_ejected && present) {
 				/* new disc in and reading (present only goes true past spin-up,
@@ -637,6 +639,7 @@ static void *prefetch_thread(void *arg)
 					   flag the poll thread gates on, so a weakly-ordered arm
 					   core cannot observe the flag with a stale toc (matches the
 					   prewarm arm; physcd_swap_consume pairs the acquire side) */
+					pcd.swap_ejected = 0;
 					__sync_synchronize();
 					pcd.swap_ready = 1;
 					swap_ejected = 0;
@@ -857,9 +860,18 @@ int physcd_drive_busy()
 
 // arm/disarm mid-mount disc-swap detection. the core calls this on a physical
 // mount so the prefetch thread watches for an eject-then-insert.
+int physcd_swap_ejected(void)
+{
+	/* mid-swap window: the disc is physically out (or back in but its toc not
+	   loaded yet). cores use this to show the guest a REAL-TIME lid-open - the
+	   lid lifts when the user ejects, not a compressed pulse after the fact. */
+	return pcd.swap_enable && pcd.swap_ejected;
+}
+
 void physcd_swap_enable(int enable)
 {
 	pcd.swap_enable = enable ? 1 : 0;
+	if (!enable) pcd.swap_ejected = 0;
 	if (!enable) pcd.swap_ready = 0;
 }
 

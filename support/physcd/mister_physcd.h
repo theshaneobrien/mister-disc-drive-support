@@ -57,8 +57,11 @@ int physcd_drive_busy();
 // mid-mount physical disc swap (multi-disc games). the core arms detection on
 // a physical mount; physcd_swap_consume() returns 1 once after an eject/insert
 // has been seen and the new toc loaded, so the core re-announces the disc.
+// physcd_swap_ejected() is 1 during the swap window itself (disc out, or back
+// in but not yet read) so a core can show the guest the lid open in REAL TIME.
 void physcd_swap_enable(int enable);
 int physcd_swap_consume(void);
+int physcd_swap_ejected(void);
 
 // build a mister toc_t from the drive TOC. sets toc->phys = 1,
 // invalidates the sector cache and probes subchannel capability.

@@ -63,12 +63,14 @@ jobs:
           set -eu
           TAG="${GITHUB_REF_NAME}"
           API="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}"
+          # a semver prerelease tag (has a hyphen, e.g. v0.2.0-beta1) is a beta
+          case "$TAG" in *-*) PRE=true;; *) PRE=false;; esac
           # find the release for this tag, or create one
           REL=$(curl -s -H "Authorization: token $TOKEN" "$API/releases/tags/$TAG")
           ID=$(printf '%s' "$REL" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2 || true)
           if [ -z "$ID" ]; then
             ID=$(curl -s -X POST -H "Authorization: token $TOKEN" -H "Content-Type: application/json" \
-              -d "{\"tag_name\":\"$TAG\",\"name\":\"physcd MiSTer $TAG\"}" "$API/releases" \
+              -d "{\"tag_name\":\"$TAG\",\"name\":\"physcd MiSTer $TAG\",\"prerelease\":$PRE}" "$API/releases" \
               | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2 || true)
           fi
           if [ -z "$ID" ]; then echo "Could not find/create a release for $TAG"; echo "$REL"; exit 1; fi

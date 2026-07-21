@@ -140,6 +140,16 @@ int physcd_mount_current_core(void)
 	return mounted;
 }
 
+int physcd_swap_current_core(void)
+{
+	// re-read the disc now in the drive and hand it to the running game as a
+	// swap (no reset). PSX only for now - the swap signalling is per core.
+	if (is_psx()) { psx_swap_disc(); return 1; }
+
+	printf("physcd: disc swap not supported on '%s' yet\n", user_io_get_core_name());
+	return 0;
+}
+
 // ------------------------------------------------------ phase B: new core
 
 void physcd_autoboot_startup(void)

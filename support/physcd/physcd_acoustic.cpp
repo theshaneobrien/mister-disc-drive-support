@@ -3,20 +3,26 @@
  *
  * we already know the lba an image-backed game is reading (the chd read path
  * hands it to physcd_acoustic_hint), so mirror those positions onto a real
- * usb drive holding a throwaway "prop" disc. the drive physically seeks and
- * spins in step with the game.
+ * usb drive holding a throwaway "prop" disc. the drive physically spins and
+ * seeks in step with the game.
  *
  *  - the hint runs on the fpga-answering thread, so it does the bare minimum:
  *    stash the lba, bump an activity counter. no ioctls, no allocation, no
  *    blocking. everything expensive is on the background thread.
- *  - the background thread issues SCSI SEEK(10) toward the latest hinted lba:
- *    a big jump becomes a big head movement (the loud seek), and during
- *    steady sequential reads it just keep-alives every so often (the steady
- *    spin). when the game goes quiet it stops, and the drive spins down on
- *    its own - exactly like a real console between loads.
- *  - the prop disc only needs a table of contents so seeks land; the data on
- *    it is irrelevant because SEEK transfers nothing. a BLANK disc will not
- *    work (no toc, the drive will not accept lba seeks).
+ *  - the background thread issues actual READs (READ(10), opcode 0x28) toward
+ *    the latest hinted lba. a SEEK only slews the head - the SPINDLE never
+ *    loads - so it just clicks; a READ forces the disc up to speed and holds
+ *    it, which is the whirr a real drive makes. richness comes from two
+ *    things: the game lba is mapped across the prop disc's whole readable
+ *    radius (position-dependent pitch), and the read burst size + cadence
+ *    track how hard the game is hitting the disc (loud under load, gentle on
+ *    a trickle). big jumps fire an immediate read at the new radius.
+ *  - when the game goes quiet it stops reading (coast), and after a few
+ *    seconds forces a full spindown so the next load has an audible spin-up.
+ *  - SEEK(10) 0x2B is the graceful-degrade tier: if a bridge rejects READ we
+ *    fall back to the original seek-only clicking rather than going silent.
+ *  - the prop disc should be a DATA disc (mode1/2048) so READs land; for a
+ *    seek-only fallback any disc with a toc works. a BLANK disc will not.
  *  - a physcd physical-game mount owns the same drive, so acoustic pauses at
  *    the menu (where physcd watches) and never opens the drive while physcd
  *    holds it.
@@ -37,22 +43,37 @@
 #include "mister_physcd.h"        // physcd_drive_busy
 #include "physcd_acoustic.h"
 
-#define ACTIVE_MS       600       // no hints for this long -> game idle, spin down
-#define JUMP_THRESHOLD  90        // lba delta that counts as a real seek (~1.2s)
-#define KEEPALIVE_MS    400       // during sustained reads, re-seek this often to hold spin
+#define ACTIVE_MS       600       // no hints this long -> stop reading (coast)
+#define DEEP_IDLE_MS    4000      // idle this long -> full spindown (audible spin-up next)
+#define JUMP_THRESHOLD  90        // mapped-lba delta that counts as a real reposition
+#define KEEPALIVE_MS    400       // SEEK-fallback tier: re-seek at least this often
+#define SAMPLE_MS       200       // how often the intensity sampler updates
+#define MIN_BURST       2         // sectors per read at a trickle
+#define MAX_BURST       32        // sectors per read under heavy load (64 KB)
+#define READ_GUARD      32        // stay this far below leadout
+#define READ_GIVEUP     6         // consecutive READ rejections -> seek-only fallback
+#define REOPEN_GIVEUP   8         // reopens with no successful op -> disable for the session
+#define GAME_LBA_MAX    360000    // game address space mapped across the prop stroke
 #define SEEK_TIMEOUT_MS 4000
+#define READ_TIMEOUT_MS 4000
 
 static struct {
 	volatile int enabled;
 	volatile int paused;
 	volatile int running;
-	volatile int unsupported;     // drive rejected SEEK; give up for this session
+	volatile int unsupported;      // drive rejected SEEK; give up for this session
+	volatile int read_unsupported; // drive rejected READ; fall back to seek-only
 	volatile int target_lba;
-	volatile unsigned seq;        // bumped by every hint; the thread watches it for activity
-	int fd;                       // thread-owned: only the acoustic thread touches it
-	int prop_max;                 // leadout lba of the prop disc, for clamping
+	volatile unsigned seq;         // bumped by every hint; the thread watches it for activity
+	int fd;                        // thread-owned: only the acoustic thread touches it
+	int prop_max;                  // leadout lba of the prop disc
+	int read_lo, read_hi;          // readable window on the prop disc
 	pthread_t thread;
-} ac = { 0, 0, 0, 0, 0, 0, -1, 0, 0 };
+} ac = { 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0 };
+
+// read sink - the data is thrown away, we only want the transfer. touched
+// ONLY by the acoustic thread, so it never shares state with the hint path.
+static uint8_t rbuf[MAX_BURST * 2048];
 
 static double now_ms(void)
 {
@@ -61,8 +82,8 @@ static double now_ms(void)
 	return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
-// SCSI SEEK(10): move the head to lba, transfer nothing. works on any disc
-// with a toc no matter what (if anything) is burned to it.
+// SCSI SEEK(10): move the head to lba, transfer nothing. the fallback tier -
+// works on any disc with a toc, but only clicks the head.
 static int sg_seek(int fd, int lba)
 {
 	uint8_t cdb[10] = { 0 };
@@ -89,9 +110,82 @@ static int sg_seek(int fd, int lba)
 	return 0;
 }
 
-// open the first /dev/srN that has a disc and read its leadout for clamping.
-// refuses to touch the drive if physcd (a physical game mount) already holds
-// it. O_CLOEXEC so a core load (which execs) never leaks the fd.
+// SCSI READ(10): read `blocks` 2048-byte sectors from lba into the sink. this
+// is the primary sound source - it spins the disc up and holds it loaded.
+// 0 ok, -1 ioctl failed (bus dropped), -2 CHECK CONDITION (bad sector / no
+// READ support).
+static int sg_read10(int fd, int lba, int blocks)
+{
+	uint8_t cdb[10] = { 0 };
+	uint8_t sense[32];
+	struct sg_io_hdr io;
+
+	cdb[0] = 0x28;                 // READ(10)
+	cdb[2] = (lba >> 24) & 0xFF;
+	cdb[3] = (lba >> 16) & 0xFF;
+	cdb[4] = (lba >> 8) & 0xFF;
+	cdb[5] = lba & 0xFF;
+	cdb[7] = (blocks >> 8) & 0xFF;
+	cdb[8] = blocks & 0xFF;
+
+	memset(&io, 0, sizeof(io));
+	io.interface_id = 'S';
+	io.cmd_len = 10;
+	io.cmdp = cdb;
+	io.dxfer_direction = SG_DXFER_FROM_DEV;
+	io.dxfer_len = blocks * 2048;
+	io.dxferp = rbuf;
+	io.sbp = sense;
+	io.mx_sb_len = sizeof(sense);
+	io.timeout = READ_TIMEOUT_MS;
+
+	if (ioctl(fd, SG_IO, &io) < 0) return -1;
+	if (io.status || io.host_status || io.driver_status) return -2;
+	return 0;
+}
+
+// SCSI START STOP UNIT: force a full spindown (LoEj=0 so it never ejects),
+// IMMED so it returns without stalling the loop. best effort, result ignored.
+static void sg_start_stop(int fd, int start)
+{
+	uint8_t cdb[6] = { 0 };
+	uint8_t sense[32];
+	struct sg_io_hdr io;
+
+	cdb[0] = 0x1B;                 // START STOP UNIT
+	cdb[1] = 0x01;                 // IMMED
+	cdb[4] = start ? 0x01 : 0x00;  // start bit; LoEj stays 0
+
+	memset(&io, 0, sizeof(io));
+	io.interface_id = 'S';
+	io.cmd_len = 6;
+	io.cmdp = cdb;
+	io.dxfer_direction = SG_DXFER_NONE;
+	io.sbp = sense;
+	io.mx_sb_len = sizeof(sense);
+	io.timeout = SEEK_TIMEOUT_MS;
+
+	ioctl(fd, SG_IO, &io);
+}
+
+// scale the game lba onto the prop disc's readable window, so every burst
+// lands on burned sectors and different game positions ride different radii
+// (position-dependent pitch on a CLV drive). monotonic - no modulo wrap.
+static int map_lba(int game_lba)
+{
+	int lo = ac.read_lo, hi = ac.read_hi;
+	if (hi <= lo) return lo;
+	if (game_lba < 0) game_lba = 0;
+	if (game_lba > GAME_LBA_MAX) game_lba = GAME_LBA_MAX;
+	int p = lo + (int)((int64_t)game_lba * (hi - lo) / GAME_LBA_MAX);
+	if (p < lo) p = lo;
+	if (p > hi) p = hi;
+	return p;
+}
+
+// open the first /dev/srN that has a disc and read its leadout. refuses to
+// touch the drive if physcd (a physical game mount) already holds it.
+// O_CLOEXEC so a core load (which execs) never leaks the fd.
 static int open_prop(void)
 {
 	if (physcd_drive_busy()) return -1;
@@ -113,8 +207,18 @@ static int open_prop(void)
 		if (ioctl(fd, CDROMREADTOCENTRY, &e) < 0) { close(fd); continue; }
 
 		ac.prop_max = e.cdte_addr.lba;
+		// leave room so even a max burst starting at read_hi ends before leadout
+		ac.read_lo = 0;
+		ac.read_hi = ac.prop_max - MAX_BURST - READ_GUARD;
+		if (ac.read_hi < ac.read_lo) ac.read_hi = ac.read_lo;
+		ac.read_unsupported = 0;   // re-probe reads on each fresh disc
 		ac.fd = fd;
-		printf("physcd_acoustic: prop disc on %s, %d sectors\n", path, ac.prop_max);
+		// only log on a genuine disc change, not on every silent reopen
+		static int last_logged_max = -1;
+		if (ac.prop_max != last_logged_max) {
+			printf("physcd_acoustic: prop disc on %s, %d sectors\n", path, ac.prop_max);
+			last_logged_max = ac.prop_max;
+		}
 		return 0;
 	}
 	return -1;
@@ -129,16 +233,16 @@ static void close_prop(void)
 static void *acoustic_thread(void *arg)
 {
 	(void)arg;
-	unsigned last_seq = 0;
-	double last_active = 0;
-	double last_open_try = 0;
-	double last_seek = 0;
-	int last_seek_lba = -1000000;   // far below any real lba, forces the first seek
-	int seek_fails = 0;             // consecutive SEEK rejections (CHECK CONDITION)
+	unsigned last_seq = 0, seq_prev = 0;
+	double last_active = 0, last_open_try = 0, last_read = 0;
+	double t_sample = 0, rate = 0;
+	int last_pos = -1000000;         // far below any real lba, forces the first op
+	int seek_fails = 0, read_fails = 0, reopen_fails = 0;
+	int idle_stopped = 0;
 
 	while (ac.running) {
-		// paused (menu owns the drive), disabled, or the drive turned out not
-		// to support SEEK: let go and idle
+		// paused (menu owns the drive), disabled, or the drive rejected even
+		// SEEK: let go and idle
 		if (!ac.enabled || ac.paused || ac.unsupported) {
 			close_prop();
 			struct timespec ts = { 0, 150 * 1000 * 1000 };
@@ -148,20 +252,22 @@ static void *acoustic_thread(void *arg)
 
 		unsigned seq = ac.seq;
 		double now = now_ms();
-		if (seq != last_seq) { last_seq = seq; last_active = now; }
+		if (seq != last_seq) { last_seq = seq; last_active = now; idle_stopped = 0; }
 
-		// game quiet for a while: stop touching the drive so it spins down,
-		// which is exactly what a real console does between loads
+		// idle: at ACTIVE_MS stop reading and coast; at DEEP_IDLE_MS force one
+		// full spindown so the next load has an audible spin-up.
 		if (now - last_active >= ACTIVE_MS) {
+			if (!idle_stopped && ac.fd >= 0 && !ac.read_unsupported
+			    && now - last_active >= DEEP_IDLE_MS) {
+				sg_start_stop(ac.fd, 0);
+				idle_stopped = 1;
+			}
 			struct timespec ts = { 0, 80 * 1000 * 1000 };
 			nanosleep(&ts, NULL);
 			continue;
 		}
 
 		// physcd grabbed the drive (a physical mount): back off entirely.
-		// cannot happen in today's topology - acoustic only gets hints during
-		// image play, where physcd is closed - but this keeps the "never touch
-		// the drive while physcd holds it" invariant true if that ever changes.
 		if (physcd_drive_busy()) {
 			close_prop();
 			struct timespec ts = { 0, 200 * 1000 * 1000 };
@@ -182,37 +288,79 @@ static void *acoustic_thread(void *arg)
 				nanosleep(&ts, NULL);
 				continue;
 			}
-			last_seek_lba = -1000000;   // far below any real lba, forces the first seek      // force the first seek on a fresh disc
+			last_pos = -1000000;   // force the first op on a fresh disc
 		}
 
-		int lba = ac.target_lba;
-		if (lba < 0) lba = 0;
-		if (ac.prop_max > 0 && lba >= ac.prop_max) lba = ac.prop_max - 1;
+		// intensity sampler: seq bumps once per hinted sector, so its rate is
+		// roughly the sectors/s the game is pulling (1x CD = 75/s). heavy load
+		// -> big bursts, tiny gap (steady whirr); a trickle -> small spaced
+		// reads (gentle hum).
+		if (now - t_sample >= SAMPLE_MS) {
+			unsigned d = seq - seq_prev;
+			double dt = now - t_sample;
+			double inst = dt > 0 ? d * 1000.0 / dt : 0;
+			rate += (inst - rate) * 0.3;   // light smoothing
+			seq_prev = seq;
+			t_sample = now;
+		}
+		int burst = 2 + (int)((rate - 8) / 6);
+		if (burst < MIN_BURST) burst = MIN_BURST;
+		if (burst > MAX_BURST) burst = MAX_BURST;
+		double gap = 120.0 - rate;
+		if (gap < 10.0) gap = 10.0;
+		if (gap > 120.0) gap = 120.0;
 
-		int jump = lba > last_seek_lba ? lba - last_seek_lba : last_seek_lba - lba;
-		int do_seek = (jump >= JUMP_THRESHOLD) || (now - last_seek >= KEEPALIVE_MS);
+		int lba = map_lba(ac.target_lba);
+		int jump = lba > last_pos ? lba - last_pos : last_pos - lba;
 
-		if (do_seek) {
-			int r = sg_seek(ac.fd, lba);
-			if (r == -1) {
-				// ioctl failed: the drive likely dropped off the usb bus.
-				// reopen next round.
-				close_prop();
-				seek_fails = 0;
-			} else if (r < 0) {
-				// SCSI CHECK CONDITION: the bridge rejected SEEK(10). plenty of
-				// usb optical bridges do not support the legacy opcode. do NOT
-				// close+reopen (that just grinds the drive once a second) -
-				// count, and after a few give up for the whole session.
-				if (++seek_fails >= 4) {
-					printf("physcd_acoustic: drive does not accept SEEK, disabling for this session\n");
-					ac.unsupported = 1;
-					close_prop();
+		if (!ac.read_unsupported) {
+			// TIER 1: real reads spin the disc
+			if (jump >= JUMP_THRESHOLD || now - last_read >= gap) {
+				int r = sg_read10(ac.fd, lba, burst);
+				if (r == 0) {
+					read_fails = 0; seek_fails = 0; reopen_fails = 0;
+					last_read = now; last_pos = lba;
+				} else if (r == -1) {
+					// transport failure: the drive likely dropped off the bus.
+					// reopen next round, but do not retry forever.
+					close_prop(); read_fails = 0;
+					if (++reopen_fails >= REOPEN_GIVEUP) {
+						printf("physcd_acoustic: drive keeps dropping, disabling for this session\n");
+						ac.unsupported = 1;
+					}
+				} else {
+					// CHECK CONDITION: an isolated bad sector, or the bridge does
+					// not do READ(10). click once; after a run of them, drop to
+					// seek-only for the session rather than thrash.
+					if (++read_fails >= READ_GIVEUP) {
+						printf("physcd_acoustic: drive rejects READ(10), seek-only fallback\n");
+						ac.read_unsupported = 1;
+					} else {
+						sg_seek(ac.fd, lba);
+					}
+					last_read = now; last_pos = lba;
 				}
-			} else {
-				seek_fails = 0;
-				last_seek = now;
-				last_seek_lba = lba;
+			}
+		} else if (!ac.unsupported) {
+			// TIER 2: seek-only (the original clicking behaviour)
+			if (jump >= JUMP_THRESHOLD || now - last_read >= KEEPALIVE_MS) {
+				int r = sg_seek(ac.fd, lba);
+				if (r == -1) {
+					close_prop(); seek_fails = 0;
+					if (++reopen_fails >= REOPEN_GIVEUP) {
+						printf("physcd_acoustic: drive keeps dropping, disabling for this session\n");
+						ac.unsupported = 1;
+					}
+				} else if (r < 0) {
+					if (++seek_fails >= 4) {
+						printf("physcd_acoustic: drive does not accept SEEK, disabling for this session\n");
+						ac.unsupported = 1;
+						close_prop();
+					}
+				} else {
+					seek_fails = 0; reopen_fails = 0;
+					last_read = now; last_pos = lba;
+				}
 			}
 		}
 
@@ -235,7 +383,7 @@ void physcd_acoustic_config(int enabled)
 			printf("physcd_acoustic: could not start thread\n");
 			return;
 		}
-		printf("physcd_acoustic: enabled (prototype) - put a prop disc in the drive\n");
+		printf("physcd_acoustic: enabled (prototype) - put a data prop disc in the drive\n");
 	}
 }
 

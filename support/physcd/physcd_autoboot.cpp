@@ -55,6 +55,9 @@ static const char *core_name_for(physcd_disc_t t)
 	case PHYSCD_DISC_PCECD:  return "TurboGrafx16";
 	case PHYSCD_DISC_NEOGEO: return "NeoGeo";
 	case PHYSCD_DISC_3DO:    return "3DO";
+	// an audio cd boots the PSX core, whose bios has the built-in cd player -
+	// the mister as a ps1 cd player, just like the real thing
+	case PHYSCD_DISC_AUDIO:  return "PSX";
 	default:                 return NULL;
 	}
 }
@@ -71,6 +74,7 @@ static int core_matches(physcd_disc_t t)
 	// in cart mode; the mount enables cd mode
 	case PHYSCD_DISC_NEOGEO: return is_neogeo();
 	case PHYSCD_DISC_3DO:    return is_3do();
+	case PHYSCD_DISC_AUDIO:  return is_psx();   // audio cd -> PSX cd player
 	default:                 return 0;
 	}
 }
@@ -82,7 +86,7 @@ static int mountable(physcd_disc_t t)
 {
 	return t == PHYSCD_DISC_MEGACD || t == PHYSCD_DISC_PSX
 		|| t == PHYSCD_DISC_SATURN || t == PHYSCD_DISC_NEOGEO
-		|| t == PHYSCD_DISC_3DO;
+		|| t == PHYSCD_DISC_3DO || t == PHYSCD_DISC_AUDIO;
 }
 
 /* resolve the rbf for a core. on the RA build, PREFER the RA-patched core
@@ -310,8 +314,9 @@ int physcd_menu_row(char *out, int outsz)
 			while (*title == ' ') title++;
 			int generic = !strcasecmp(title, physcd_console_name(t))
 				|| !strcasecmp(title, physcd_disc_name(t));
-			if (*title && !generic) snprintf(out, outsz, "Play: %s - %s", title, physcd_console_name(t));
-			else                    snprintf(out, outsz, "Play %s Disc", physcd_console_name(t));
+			if (t == PHYSCD_DISC_AUDIO)  snprintf(out, outsz, "Play Audio CD");
+			else if (*title && !generic) snprintf(out, outsz, "Play: %s - %s", title, physcd_console_name(t));
+			else                         snprintf(out, outsz, "Play %s Disc", physcd_console_name(t));
 			return 1;
 		}
 	}

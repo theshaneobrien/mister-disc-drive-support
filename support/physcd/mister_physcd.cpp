@@ -155,9 +155,12 @@ static struct {
 	int watch_type;
 	char watch_label[64];
 	volatile int watch_dirty;     /* presence changed since last query  */
+	volatile int swap_enable;     /* arm mid-mount physical disc-swap detection */
+	volatile int swap_ready;      /* a swap happened; the new toc is loaded     */
+	volatile int swapping;        /* reload in flight: the read path serves zeros */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0 };
 
 static int track_of(int lba)
 {
@@ -474,6 +477,10 @@ static void *prefetch_thread(void *arg)
 	double last_watch = 0;
 	int was_present = -1;
 
+	double last_swap_check = 0;
+	int swap_was_present = -1;
+	int swap_ejected = 0;
+
 	while (pcd.running) {
 		int target = -1;
 
@@ -562,6 +569,46 @@ static void *prefetch_thread(void *arg)
 			struct timespec ts = { 0, 50 * 1000 * 1000 };
 			nanosleep(&ts, NULL);
 			continue;
+		}
+
+		/* mid-mount physical disc swap (multi-disc games), armed by the core
+		   for phys mounts. watch the present edge; on eject then insert,
+		   reload the toc HERE - on this thread, so it serialises against
+		   fill_cache, and pcd.swapping makes the consumer read path serve
+		   zeros while trk[]/leadout are rewritten. then flag the core (via
+		   physcd_swap_consume) to re-announce the disc without a reset. */
+		/* (leadout>0 || swap_ejected): a failed reload leaves leadout at 0, so
+		   keep the block armed while an eject is pending or we would never
+		   retry and the read path would serve zeros forever. */
+		if (pcd.swap_enable && (pcd.leadout > 0 || swap_ejected)
+		    && now_ms() - last_swap_check >= 500) {
+			last_swap_check = now_ms();
+			int present = physcd_disc_present();
+			if (swap_was_present == 1 && !present) {
+				swap_ejected = 1;                 /* disc pulled */
+			}
+			else if (swap_ejected && present) {
+				/* new disc in and reading (present only goes true past spin-up,
+				   but a first read can still fail on a marginal disc - keep
+				   swap_ejected so we retry). the reload runs under pcd.io so its
+				   toc ioctls cannot race a consumer fill_cache, and pcd.swapping
+				   bails the read path while trk[]/leadout are rewritten. */
+				toc_t scratch;
+				pcd.swapping = 1;
+				pthread_mutex_lock(&pcd.io);
+				physcd_forget_disc();
+				int ok = !physcd_load_toc(&scratch);
+				pthread_mutex_unlock(&pcd.io);
+				pcd.swapping = 0;
+				if (ok) {
+					pcd.swap_ready = 1;
+					swap_ejected = 0;
+					printf("physcd: disc swap - new toc loaded\n");
+				}
+				/* load failed (drive not settled): swap_ejected stays set, the
+				   gate above keeps retrying every 500ms until it reads */
+			}
+			swap_was_present = present;
 		}
 
 		/* serve the neediest active window, alternating which one
@@ -740,6 +787,24 @@ int physcd_drive_busy()
 	return pcd.fd >= 0;
 }
 
+// arm/disarm mid-mount disc-swap detection. the core calls this on a physical
+// mount so the prefetch thread watches for an eject-then-insert.
+void physcd_swap_enable(int enable)
+{
+	pcd.swap_enable = enable ? 1 : 0;
+	if (!enable) pcd.swap_ready = 0;
+}
+
+// 1 once after a physical disc swap has been detected and the new toc loaded,
+// so the core can re-announce the disc. O(1) read-and-clear, safe from the
+// core poll thread.
+int physcd_swap_consume(void)
+{
+	int r = pcd.swap_ready;
+	pcd.swap_ready = 0;
+	return r;
+}
+
 // probe raw P-W subchannel support once per disc: only conclude "no"
 // when a plain read of the same sector succeeds where the sub read
 // failed (a scratched sector must not disable subchannel for good).
@@ -851,7 +916,8 @@ int physcd_load_toc(toc_t *toc)
    -1 if nothing is mounted. */
 int physcd_current_toc(toc_t *toc)
 {
-	if (!toc || pcd.fd < 0 || pcd.ntrk < 1 || pcd.leadout <= 0) return -1;
+	// pcd.swapping: a reload is rewriting trk[]/leadout, do not copy mid-flight
+	if (!toc || pcd.fd < 0 || pcd.swapping || pcd.ntrk < 1 || pcd.leadout <= 0) return -1;
 
 	memset(toc, 0, sizeof(toc_t));
 	for (int i = 0; i < pcd.ntrk; i++) {
@@ -888,9 +954,11 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 {
 	if (sub_valid) *sub_valid = 0;
 
-	if (pcd.fd < 0 || lba < 0 || lba >= pcd.leadout) {
-		/* always leave dst defined: megacd's ReadCDDA ignores the
-		   return value and would otherwise ship an uninitialized
+	if (pcd.fd < 0 || pcd.swapping || lba < 0 || lba >= pcd.leadout) {
+		/* pcd.swapping: a disc swap is reloading the toc on the prefetch
+		   thread, so bail here before touching pcd.trk[]/leadout while they
+		   are being rewritten. always leave dst defined: megacd's ReadCDDA
+		   ignores the return value and would otherwise ship an uninitialized
 		   stack buffer to the fpga */
 		memset(dst, 0, PHYSCD_RAW);
 		if (sub96) memset(sub96, 0, PHYSCD_SUB);

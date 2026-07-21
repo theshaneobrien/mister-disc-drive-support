@@ -519,8 +519,10 @@ void psx_fill_blanksave(uint8_t *buffer, uint32_t lba, int cnt)
 static toc_t toc = {};
 
 // the f_index/s_index the physical disc was mounted with, so a swap can
-// re-register the new disc on the same channels
+// re-register the new disc on the same channels, plus the region (a multi-disc
+// game keeps the same region across discs, so no disc read needed on a swap)
 static int s_swap_fidx = 1, s_swap_sidx = 1;
+static region_t s_swap_region = UNKNOWN;
 #define CD_SECTOR_LEN 2352
 
 int psx_chd_hunksize()
@@ -776,6 +778,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 			if (region == region_t::UNKNOWN)
 				region = game_info.region;
 			printf("Game ID: %s, region: %s\n", game_id, region_string(region));
+			if (phys) s_swap_region = region;   // reused by a later disc swap
 
 			/* region and game id come from the disc itself, so they
 			   work on a physical mount with no extra plumbing. the
@@ -890,12 +893,16 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 
 			mount_cd(toc.end*CD_SECTOR_LEN, s_index);
 			loaded = 1;
+
+			// arm mid-game physical disc-swap detection (multi-disc games)
+			if (phys) physcd_swap_enable(1);
 		}
 	}
 
 	if (!loaded)
 	{
 		printf("Unmount CD\n");
+		physcd_swap_enable(0);
 		if (toc.phys) unload_phys(&toc);
 		unload_cue(&toc);
 		unload_chd(&toc);
@@ -906,10 +913,34 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 	return loaded;
 }
 
-// re-read the physical disc now in the drive and hand it to the running core
-// as a disc SWAP (reset bit clear, memory card untouched), so a multi-disc
-// game keeps going. triggered manually for now via the swap_phys fifo command;
-// stage B will detect the physical eject/insert and call this automatically.
+// announce the disc physcd currently has loaded to the running core as a SWAP
+// (reset bit clear, memory card untouched), so a multi-disc game keeps going.
+// the new disc's toc must already be loaded in physcd - the auto path reloads
+// on the prefetch thread, the manual path reloads first. no drive read here,
+// so this is safe to call from psx_poll.
+static void psx_swap_apply()
+{
+	toc_t nt = {};
+	if (physcd_current_toc(&nt) || !nt.last) return;
+	apply_phys_bias(&nt);
+	toc = nt;   // adopt; psx_poll and psx_read_cd run on this same thread, no lock
+
+	// reuse the mount region: a multi-disc game is the same region across
+	// discs, and this keeps the poll thread from doing a disc read here.
+	region_t region = s_swap_region;
+
+	// SWAP: reset bit CLEAR, and DO NOT touch the memory card or gameid - the
+	// save follows the game across discs. libcrypt mask 0 is fine for the
+	// multi-disc rpgs this is for (FF etc).
+	printf("PSX: disc swap -> region %s\n", region_string(region));
+	send_cue_and_metadata(&toc, 0, region, 0);
+	user_io_set_index(s_swap_fidx);
+	mount_cd(toc.end * CD_SECTOR_LEN, s_swap_sidx);
+}
+
+// manual trigger (swap_phys fifo): re-read the disc now in the drive, then
+// announce it. blocking, but it is a deliberate user action. stage-B auto
+// detection makes this unnecessary, but it stays as a fallback.
 void psx_swap_disc()
 {
 	if (!toc.phys)
@@ -917,34 +948,21 @@ void psx_swap_disc()
 		printf("PSX: swap_phys ignored - the running game is not on a physical disc\n");
 		return;
 	}
-
-	// re-read the disc now in the drive. physcd is already open, so this just
-	// re-reads the toc and resets the cache (fine mid-swap, the game is waiting
-	// for the new disc anyway).
-	toc_t nt = {};
-	if (physcd_load_toc(&nt) || !nt.last)
+	toc_t scratch = {};
+	if (physcd_load_toc(&scratch) || !scratch.last)
 	{
 		printf("PSX: swap_phys - new disc not ready, wait a moment and retry\n");
 		return;
 	}
-	apply_phys_bias(&nt);
-	toc = nt;   // adopt; psx_poll and psx_read_cd run on this same thread, no lock
-
-	region_t region = psx_get_region();
-	if (region == region_t::UNKNOWN) region = psx_get_game_info().region;
-
-	// hand it over as a SWAP: reset bit CLEAR, and DO NOT touch the memory card
-	// or gameid - the save follows the game across discs, not the disc. libcrypt
-	// mask 0 is fine for multi-disc rpgs (FF etc); an sbi-protected game would
-	// want its mask recomputed, a later refinement.
-	printf("PSX: disc swap -> region %s\n", region_string(region));
-	send_cue_and_metadata(&toc, 0, region, 0);
-	user_io_set_index(s_swap_fidx);
-	mount_cd(toc.end * CD_SECTOR_LEN, s_swap_sidx);
+	psx_swap_apply();
 }
 
 void psx_poll()
 {
+	// stage B: the prefetch thread flags a physical disc swap once the new
+	// disc's toc is loaded; announce it to the core.
+	if (toc.phys && physcd_swap_consume()) psx_swap_apply();
+
 	spi_uio_cmd(UIO_CD_GET);
 }
 

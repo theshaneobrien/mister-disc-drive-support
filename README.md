@@ -1,21 +1,20 @@
 # MiSTer USB CDROM Loader
 
-Load almost any CD game on a MiSTer straight from a USB CD or DVD drive, no ripping. Put a disc in, play it. Music CDs too, the MiSTer makes a rather nice CD player now. And if you want, earn RetroAchievements off the physical disc while you are at it.
+Load almost any CD game on a MiSTer straight from a USB CD or DVD drive, no ripping. Put a disc in, play it, Music CDs too! If you want, earn RetroAchievements off the physical disc while you are at it.
 
 This is a fork of Main_MiSTer, the ARM/Linux side of MiSTer. All the work is in userspace, the FPGA never touches the drive, and the disc build leaves the cores stock. The ARM binary just answers the core's sector requests from the real disc instead of from a file on the SD card.
 
 ## Features
 
 * Play CD games straight from a USB drive, no ripping: MegaCD, PlayStation, Saturn, NeoGeo CD, and 3DO.
-* Disc swapping. A multi disc PlayStation game asks for the next disc, you swap it, it keeps playing. No buttons.
-* Vib Ribbon with your own music. Boot the game, swap in any album off your shelf, ride your record collection.
-* Audio CDs. Put a music disc in and the MiSTer boots a console's built in CD player. Swap albums whenever.
+* Disc swapping. A multi disc PlayStation game asks for the next disc, you swap it, it keeps playing. ([Video](https://youtu.be/J477S55O5DE))
+* Vib Ribbon with your own music. Boot the game, swap in any album off your shelf. ([Video](https://youtu.be/msHR5iKsleY))
+* Audio CDs. Put a music disc in and the MiSTer boots a console's built in CD player. Swap albums whenever. Choose your default console as a player. ([Video](https://youtu.be/r3Z2uLo_iXA))
 * The disc is detected automatically and the right core loads.
 * Autoboot when you drop a disc in, or a manual Play row in the menu.
-* RetroAchievements earned straight off the physical disc, on the RA build.
+* RetroAchievements earned straight off the physical disc, on the RA build (Really depends on your disc and supported hashes).
 * Region sorted per core, usually just set it to Auto.
-* CD audio tracks where the core supports them.
-* Acoustic seek: pop a spare disc in and the drive spins and seeks along with games you play off the SD card, for the sound of a real console.
+* Acoustic Disc Mirror: pop a spare disc in and the drive spins and seeks along with CHD games you play off the SD card, for the sound of a real console. ([Video](https://youtu.be/H7zMJVK5tPI))
 
 ## Heads up, this was written with AI
 
@@ -32,29 +31,23 @@ The disc side is identical in both.
 
 ## What works
 
-* MegaCD, PlayStation, Saturn, NeoGeo CD, and 3DO games boot and play from disc, CD audio included where the core supports it.
-* The disc is identified automatically, so the right core loads for whatever you put in.
-* RetroAchievements straight from the disc, on the RA build, for the cores RA supports (MegaCD, PlayStation, Saturn, PC Engine CD, NeoGeo CD). I have earned achievements on PS1 games with nothing but the disc in the drive. See the RetroAchievements section.
-* Autoboot: drop a disc in at the menu and it loads the right core and mounts it, hands free.
-* Manual: a Play row at the bottom of the core list, so you load a disc when you want.
-* Acoustic seek: play a game off the SD card and a spare disc in the drive spins and seeks along with it, for the sound of a real console. Off by default, see Settings.
-* Disc swapping: PlayStation multi disc games just work, eject and insert, tested with Final Fantasy VII on retail discs. Vib Ribbon takes any album you feed it. See Disc swapping.
-* Audio CDs play in the PlayStation, Mega CD, Saturn, and NeoGeo CD players, with live album swapping. See Audio CDs.
+Everything in the above features section! This is still early though so any and all testing and confirmation will be helpful.
 
-PC Engine CD and CD-i can be added the same way, I just have no discs to test with.
+For core requests, I've added everything I own discs for, I'm not sure about testing on burnt discs or the word of an AI.
 
 ## What you need
 
-* A MiSTer. I have only tested on a DE10-nano. No kernel changes, no FPGA changes.
+* A MiSTer. I have only tested on a DE10-nano. No kernel changes, no FPGA changes. Let me know if it works on other devices!
 * A USB CD or DVD drive. Most drives that show up as /dev/sr0 work. There is a probe tool (physcd_probe) you can run on the MiSTer to check one first. The two I have tested:
-  * Hitachi LG GP60NB60, https://www.amazon.co.uk/dp/B01G33IRYS
-  * LIUAN External CD DVD Drive, model B0260, https://www.amazon.co.uk/dp/B0BB6YCHK4
+  * Hitachi LG GP60NB60, https://www.amazon.co.uk/dp/B01G33IRYS (This thing works amazingly)
+  * LIUAN External CD DVD Drive, model B0260, https://www.amazon.co.uk/dp/B0BB6YCHK4 (This one kinda sucks, the disc tray won't open if its too warm)
 * A decent power supply for the drive. This one matters. A CD drive pulls a big gulp of current spinning up for a seek, and the DE10-nano's USB or a cheap hub will sag under it, drop the drive off the bus, and take your controllers with it for a minute. Use a powered hub, ideally give the drive its own supply. A game that freezes for a minute then carries on by itself is power, not the software.
 
 ## Setup
 
 1. Grab the binary from the releases page, Disc or Disc plus RetroAchievements. Back up your current /media/fat/MiSTer, drop the new one in, reboot.
 2. Set each CD core's Region to Auto where it has the option, see Region.
+3. For RetroAchievements setup use MisterCompanion or follow their repos instructions.
 
 On BIOS files, I did not touch any of mine, it all just worked through MiSTer Companion. If your CD cores already run ripped games the BIOS files are already in place, so stick with what you have.
 
@@ -88,9 +81,9 @@ That mounts the drive into whatever CD core is already running.
 
 Multi disc games work with real discs. On PlayStation you play until the game asks for the next disc, eject, put the next one in, and the game carries on by itself. Tested with Final Fantasy VII on retail discs, it just notices, no buttons, no menus.
 
-The one everyone should try is Vib Ribbon. Boot the game disc, then swap in any music CD you own and it builds levels from your album. Exactly like the real PlayStation, shelf of CDs and all.
+The one I'm most happy with is Vib Ribbon. Boot the game disc, then swap in any music CD you own and it builds levels from your album. Exactly like the real PlayStation, shelf of CDs and all. It can be a little flakey, but I think it's a timing issue (working on it!)
 
-Saturn multi disc games take one extra step. The Saturn runs a disc change through its BIOS, so after you swap it checks the new disc and offers Start Application. Select that and the game carries on. Saturn multi disc games save before a swap as part of their normal flow, so nothing is lost. The console even reports Drive Door Open while the tray is out, which is a nice touch.
+Saturn multi disc games take one extra step. The Saturn runs a disc change through its BIOS, so after you swap it checks the new disc and offers Start Application. Select that and the game carries on. Saturn multi disc games save before a swap as part of their normal flow, so nothing is lost. The console even reports Drive Door Open while the tray is out, which is a nice touch. Not sure how D plays like this tbh.
 
 Swaps are detected automatically from the physical eject and insert. On PlayStation there is also a fifo fallback if a game ever misses one:
 
@@ -116,11 +109,11 @@ PHYSCD_ACOUSTIC=0     ; 1 = a spare disc in the drive spins and seeks along with
 PHYSCD_AUDIO_CORE=PSX ; which console's CD player an audio disc boots: PSX, MegaCD, Saturn, or NeoGeo
 ```
 
-## Acoustic seek
+## Acoustic seek / Disc Mirroring
 
-A daft one, but I like it. When you play a game from the SD card (a chd), the binary already knows what part of the disc the game is reading. With PHYSCD_ACOUSTIC=1 it mirrors that onto a real drive: pop any spare disc in and it spins up, seeks, and changes speed in step with the game, so an emulated game gets the sound of a real console.
+This is really stupid, but I love it. When you play a game from the SD card (a chd), the binary already knows what part of the disc the game is reading. With PHYSCD_ACOUSTIC=1 it mirrors that onto a real drive: pop any spare disc in and it spins up, seeks, and changes speed in step with the game, so an emulated game gets the sound of a real console.
 
-It only makes noise, it does not read anything the game needs, so the disc is throwaway. For the fullest sound use a full data CD-R, one data track burned to the edge, so the drive can read and seek across the whole platter. It pauses at the menu and never touches a disc you are actually playing.
+It only makes noise, it does not read anything the game needs, so the disc is throwaway. For the fullest sound use a full data CD-R (Mode 1, closed session), one data track burned to the edge, so the drive can read and seek across the whole platter. It pauses at the menu and never touches a disc you are actually playing.
 
 ## RetroAchievements
 
@@ -136,7 +129,7 @@ Set the core Region to Auto. Softcore confirms a game identifies, hardcore is st
 
 ## It is a fork, and it stays one
 
-Upstream MiSTer has said they will not support USB CD drives, so this is probably never getting folded back in. It follows Main_MiSTer loosely and will lag at times, so a newer main feature might mean rebasing it yourself. The changes are kept small and behind a physcd flag on purpose, so that is not too painful.
+Upstream MiSTer has said they will not support USB CD drives, so this is probably never getting folded back in. It follows Main_MiSTer loosely and will lag at times, so a newer main feature might mean rebasing it yourself. The changes are kept small and behind a physcd flag on purpose, so that is not too painful. I'll be updating once a month or if something really cool happens.
 
 ## Building
 

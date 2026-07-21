@@ -1,18 +1,12 @@
-# Build the physcd MiSTer binary and attach it to a Gitea release.
+# Build BOTH MiSTer binaries and attach them to a Gitea release.
 #
-# Mirrors the scriobh android.yml release pattern (same Gitea instance):
-# the built-in GITHUB_TOKEN with contents:write does the release, and
-# REGISTRY_TOKEN is the fallback. A downloadable binary belongs on the
-# Releases page, same as scriobh attaches its APK there.
+# A release ships two builds: MiSTer-disc (this physcd branch, stock cores)
+# and MiSTer-disc-RA (the physcd-ra branch, odelot's RA fork + physcd). Both
+# install to /media/fat/MiSTer; the download names keep them apart.
 #
-# Lives on the `physcd` branch because that is where the Main_MiSTer
-# source is (the root repo's `main` branch gitignores it).
-#
-# Prereq: an act_runner online whose default image has git + node (a
-# catthehacker/ubuntu:act-* image), same as the runner scriobh uses.
-#
-# Trigger: push a tag like v1.0.0 (builds + attaches to the release), or
-# run by hand from the Actions tab (builds only, nothing to attach).
+# Prereq: an act_runner online whose default image has git + node.
+# Trigger: push a tag like v1.0.0 (a hyphenated tag e.g. v0.2.0-beta1 is
+# marked prerelease), or run by hand from the Actions tab.
 
 name: build-release
 
@@ -27,17 +21,23 @@ jobs:
     permissions:
       contents: write        # the release attach needs repo-contents write
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the disc build (this ref, physcd)
+        uses: actions/checkout@v4
+        with:
+          path: disc
+      - name: Check out the RA build (physcd-ra)
+        uses: actions/checkout@v4
+        with:
+          ref: physcd-ra
+          path: ra
 
       - name: Install the ARM toolchain and build deps
         run: |
           set -eu
-          # sudo if the runner user is non-root; harmless no-op if it runs as root
           SUDO=$(command -v sudo || true)
           $SUDO apt-get update
           $SUDO apt-get install -y --no-install-recommends \
             wget xz-utils make rsync ca-certificates
-          # same toolchain the local docker build and upstream use
           GCC_VER=10.2-2020.11
           wget -q --no-check-certificate \
             "https://developer.arm.com/-/media/Files/downloads/gnu-a/${GCC_VER}/binrel/gcc-arm-${GCC_VER}-x86_64-arm-none-linux-gnueabihf.tar.xz" \
@@ -46,18 +46,21 @@ jobs:
           $SUDO tar xf /tmp/gcc.tar.xz -C /opt/toolchain --strip-components=1
           echo "/opt/toolchain/bin" >> "$GITHUB_PATH"
 
-      - name: Build MiSTer
+      - name: Build both binaries
         run: |
           set -eu
           arm-none-linux-gnueabihf-gcc --version | head -1
-          make -j"$(nproc)"
-          ls -l bin/MiSTer bin/MiSTer.elf
+          make -C disc -j"$(nproc)"
+          cp disc/bin/MiSTer MiSTer-disc
+          make -C ra -j"$(nproc)"
+          cp ra/bin/MiSTer MiSTer-disc-RA
+          ls -l MiSTer-disc MiSTer-disc-RA
 
-      - name: Attach MiSTer to the Gitea release
+      - name: Attach both to the Gitea release
         if: startsWith(github.ref, 'refs/tags/')
         env:
-          # prefer the auto Actions token (has contents:write via permissions
-          # above); fall back to REGISTRY_TOKEN, exactly as scriobh does
+          # prefer the auto Actions token (contents:write via permissions);
+          # fall back to REGISTRY_TOKEN, same as scriobh
           TOKEN: ${{ secrets.GITHUB_TOKEN || secrets.REGISTRY_TOKEN }}
         run: |
           set -eu
@@ -74,8 +77,10 @@ jobs:
               | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2 || true)
           fi
           if [ -z "$ID" ]; then echo "Could not find/create a release for $TAG"; echo "$REL"; exit 1; fi
-          # asset name is exactly MiSTer so it drops onto the SD card as-is
           curl -fsS -X POST -H "Authorization: token $TOKEN" \
-            -F "attachment=@bin/MiSTer;type=application/octet-stream" \
-            "$API/releases/$ID/assets?name=MiSTer"
-          echo "Attached bin/MiSTer to release $TAG."
+            -F "attachment=@MiSTer-disc;type=application/octet-stream" \
+            "$API/releases/$ID/assets?name=MiSTer-disc"
+          curl -fsS -X POST -H "Authorization: token $TOKEN" \
+            -F "attachment=@MiSTer-disc-RA;type=application/octet-stream" \
+            "$API/releases/$ID/assets?name=MiSTer-disc-RA"
+          echo "Attached MiSTer-disc and MiSTer-disc-RA to release $TAG."

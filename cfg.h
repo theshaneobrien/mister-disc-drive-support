@@ -38,6 +38,9 @@ typedef struct {
 	uint16_t vscale_border;
 	uint8_t rbf_hide_datecode;
 	uint8_t menu_pal;
+	uint8_t physcd_autoboot;	// insert a disc at the menu -> load its core and mount it
+	uint8_t physcd_mount_delay;	// seconds to let the core settle before mounting
+	uint8_t physcd_acoustic;	// mirror image-game disc reads onto a real drive for the sound (prototype)
 	int16_t bootcore_timeout;
 	uint8_t fb_size;
 	uint8_t fb_terminal;

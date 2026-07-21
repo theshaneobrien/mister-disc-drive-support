@@ -16,6 +16,7 @@
 #include <stdint.h>
 
 #include "support/chd/mister_chd.h"    // mister_load_chd, mister_chd_read_sector
+#include "support/physcd/mister_physcd.h" // physcd_current_toc, physcd_read_*, PHYSCD_SENTINEL
 #include "lib/rcheevos/include/rc_hash.h"
 
 // ── magic tags to distinguish handle types at runtime ──────────────────────
@@ -73,6 +74,42 @@ static uint32_t sector_data_offset(const cd_track_t* t)
     return 0;  // TT_CDDA: raw audio
 }
 
+// map an rc_hash track id to a 0-based index into toc->tracks[], or -1 for
+// "no track, let rcheevos fall back" (not found, or a second-session request
+// that a chd/physical toc can't express). shared by the chd and physcd
+// openers - both select the same way, only their handle/cleanup differ.
+static int ra_select_track_idx(const toc_t* toc, uint32_t track_id)
+{
+    int num = toc->last;
+
+    if (track_id == RC_HASH_CDTRACK_FIRST_DATA) {
+        for (int i = 0; i < num; i++)
+            if (toc->tracks[i].type != TT_CDDA) return i;
+        return -1;
+    }
+    if (track_id == RC_HASH_CDTRACK_LAST)
+        return num - 1;
+    if (track_id == RC_HASH_CDTRACK_LARGEST) {
+        int best = -1, idx = -1;
+        for (int i = 0; i < num; i++) {          // prefer largest data track
+            if (toc->tracks[i].type == TT_CDDA) continue;
+            int len = toc->tracks[i].end - toc->tracks[i].start;
+            if (len > best) { best = len; idx = i; }
+        }
+        if (idx < 0)                             // fallback: largest audio track
+            for (int i = 0; i < num; i++) {
+                int len = toc->tracks[i].end - toc->tracks[i].start;
+                if (len > best) { best = len; idx = i; }
+            }
+        return idx;
+    }
+    if (track_id == RC_HASH_CDTRACK_FIRST_OF_SECOND_SESSION)
+        return -1;   // no session boundaries in a chd/physical toc
+
+    int i = (int)track_id - 1;                    // 1-based track number
+    return (i >= 0 && i < num) ? i : -1;
+}
+
 // ── CHD callbacks ──────────────────────────────────────────────────────────
 static void* ra_chd_open_track(const char* path, uint32_t track_id)
 {
@@ -94,47 +131,7 @@ static void* ra_chd_open_track(const char* path, uint32_t track_id)
         return NULL;
     }
 
-    int num = h->toc.last;   // number of tracks
-    int idx = -1;
-
-    if (track_id == RC_HASH_CDTRACK_FIRST_DATA) {
-        for (int i = 0; i < num; i++) {
-            if (h->toc.tracks[i].type != TT_CDDA) { idx = i; break; }
-        }
-    }
-    else if (track_id == RC_HASH_CDTRACK_LAST) {
-        idx = num - 1;
-    }
-    else if (track_id == RC_HASH_CDTRACK_LARGEST) {
-        int best_len = -1;
-        // prefer largest data track
-        for (int i = 0; i < num; i++) {
-            if (h->toc.tracks[i].type == TT_CDDA) continue;
-            int len = h->toc.tracks[i].end - h->toc.tracks[i].start;
-            if (len > best_len) { best_len = len; idx = i; }
-        }
-        if (idx < 0) {
-            // fallback: largest audio track
-            for (int i = 0; i < num; i++) {
-                int len = h->toc.tracks[i].end - h->toc.tracks[i].start;
-                if (len > best_len) { best_len = len; idx = i; }
-            }
-        }
-    }
-    else if (track_id == RC_HASH_CDTRACK_FIRST_OF_SECOND_SESSION) {
-        // CHD doesn't preserve session boundaries; return NULL so rcheevos
-        // falls back to its alternative strategy automatically.
-        chd_close(h->toc.chd_f);
-        free(h->hunkbuf);
-        free(h);
-        return NULL;
-    }
-    else {
-        // 1-based track number
-        int i = (int)track_id - 1;
-        if (i >= 0 && i < num) idx = i;
-    }
-
+    int idx = ra_select_track_idx(&h->toc, track_id);
     if (idx < 0) {
         chd_close(h->toc.chd_f);
         free(h->hunkbuf);
@@ -192,6 +189,75 @@ static uint32_t ra_chd_first_track_sector(void* handle)
     return (uint32_t)h->toc.tracks[h->track_idx].start;
 }
 
+// ── physcd (physical drive) callbacks ──────────────────────────────────────
+// a physical mount has no file: the "path" carries the physcd sentinel, and
+// sectors come straight off the drive via the physcd backend (already in its
+// cache). used ONCE at load to hash/identify the disc for RetroAchievements;
+// RA never touches the disc again during play.
+#define RA_PHYSCD_MAGIC  0x50485943u   // 'PHYC'
+
+struct ra_physcd_handle {
+    unsigned int magic;      // RA_PHYSCD_MAGIC
+    toc_t        toc;
+    int          track_idx;  // 0-based index into toc.tracks[]
+};
+
+static bool path_is_physcd(const char* path)
+{
+    // the sentinel is a distinctive string that never occurs in a real path,
+    // so a substring match survives whatever prefix the caller prepends
+    return strstr(path, PHYSCD_SENTINEL) != NULL;
+}
+
+static void* ra_physcd_open_track(uint32_t track_id)
+{
+    ra_physcd_handle* h = (ra_physcd_handle*)calloc(1, sizeof(ra_physcd_handle));
+    if (!h) return NULL;
+    h->magic = RA_PHYSCD_MAGIC;
+
+    if (physcd_current_toc(&h->toc)) { free(h); return NULL; }
+
+    int idx = ra_select_track_idx(&h->toc, track_id);
+    if (idx < 0) { free(h); return NULL; }
+    h->track_idx = idx;
+    return h;
+}
+
+static size_t ra_physcd_read_sector(void* handle, uint32_t sector,
+                                    void* buffer, size_t requested_bytes)
+{
+    ra_physcd_handle* h = (ra_physcd_handle*)handle;
+    cd_track_t*       t = &h->toc.tracks[h->track_idx];
+
+    if (t->type == TT_CDDA) {
+        // raw 2352-byte audio frame
+        uint8_t raw[PHYSCD_RAW];
+        if (physcd_read_sector((int)sector, raw, NULL)) return 0;
+        if (requested_bytes > PHYSCD_RAW) requested_bytes = PHYSCD_RAW;
+        memcpy(buffer, raw, requested_bytes);
+        return requested_bytes;
+    }
+
+    // data track: physcd strips the mode1/mode2 sync+header and returns the
+    // 2048-byte user payload, which is exactly what the hasher wants
+    uint8_t data[2048];
+    if (physcd_read_data2048((int)sector, data)) return 0;
+    if (requested_bytes > sizeof(data)) requested_bytes = sizeof(data);
+    memcpy(buffer, data, requested_bytes);
+    return requested_bytes;
+}
+
+static void ra_physcd_close_track(void* handle)
+{
+    free(handle);
+}
+
+static uint32_t ra_physcd_first_track_sector(void* handle)
+{
+    ra_physcd_handle* h = (ra_physcd_handle*)handle;
+    return (uint32_t)h->toc.tracks[h->track_idx].start;
+}
+
 // ── Unified dispatcher: CHD takes priority, .cue/.gdi goes to default ──────
 // rcheevos 12: the default cdreader only provides the iterator-based open
 // handler (open_track is NULL), so the dispatcher must be registered as
@@ -199,6 +265,9 @@ static uint32_t ra_chd_first_track_sector(void* handle)
 static void* ra_unified_open_track_iterator(const char* path, uint32_t track_id,
                                             const struct rc_hash_iterator* iterator)
 {
+    if (path_is_physcd(path))
+        return ra_physcd_open_track(track_id);
+
     if (path_is_chd(path))
         return ra_chd_open_track(path, track_id);
 
@@ -219,8 +288,11 @@ static void* ra_unified_open_track_iterator(const char* path, uint32_t track_id,
 static size_t ra_unified_read_sector(void* handle, uint32_t sector,
                                       void* buffer, size_t requested_bytes)
 {
-    if (*(unsigned int*)handle == RA_CHD_MAGIC)
+    unsigned int m = *(unsigned int*)handle;
+    if (m == RA_CHD_MAGIC)
         return ra_chd_read_sector(handle, sector, buffer, requested_bytes);
+    if (m == RA_PHYSCD_MAGIC)
+        return ra_physcd_read_sector(handle, sector, buffer, requested_bytes);
 
     ra_default_handle* h = (ra_default_handle*)handle;
     return s_default.read_sector(h->inner, sector, buffer, requested_bytes);
@@ -228,8 +300,13 @@ static size_t ra_unified_read_sector(void* handle, uint32_t sector,
 
 static void ra_unified_close_track(void* handle)
 {
-    if (*(unsigned int*)handle == RA_CHD_MAGIC) {
+    unsigned int m = *(unsigned int*)handle;
+    if (m == RA_CHD_MAGIC) {
         ra_chd_close_track(handle);
+        return;
+    }
+    if (m == RA_PHYSCD_MAGIC) {
+        ra_physcd_close_track(handle);
         return;
     }
     ra_default_handle* h = (ra_default_handle*)handle;
@@ -239,8 +316,11 @@ static void ra_unified_close_track(void* handle)
 
 static uint32_t ra_unified_first_track_sector(void* handle)
 {
-    if (*(unsigned int*)handle == RA_CHD_MAGIC)
+    unsigned int m = *(unsigned int*)handle;
+    if (m == RA_CHD_MAGIC)
         return ra_chd_first_track_sector(handle);
+    if (m == RA_PHYSCD_MAGIC)
+        return ra_physcd_first_track_sector(handle);
 
     ra_default_handle* h = (ra_default_handle*)handle;
     return s_default.first_track_sector(h->inner);

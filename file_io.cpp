@@ -973,11 +973,15 @@ void FileGenerateSavestatePath(const char *name, char* out_name, int sufx)
 		strcat(fname, name);
 	}
 
+	/* a name with no extension (e.g. the physcd path substitutes a
+	   bare game id like "SCES-01565") must append rather than deref
+	   a NULL strrchr result - this crashed main with SIGSEGV at 0 */
 	char *e = strrchr(fname, '.');
 	if (e) e[0] = 0;
+	else e = fname + strlen(fname);
 
 	if(sufx) sprintf(e, "_%d.ss", sufx);
-	else strcat(e, ".ss");
+	else strcpy(e, ".ss");
 }
 
 uint32_t getFileType(const char *name)
@@ -1789,9 +1793,37 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 		}
 
 		printf("Got %d dir entries\n", flist_nDirEntries());
-		if (!flist_nDirEntries()) return 0;
 
 		std::sort(DirItem.begin(), DirItem.end(), DirentComp());
+
+		/* physcd: add a "Play Disc" / "Insert Disc" row at the BOTTOM of
+		   the menu core list whenever a drive is attached, so it is a
+		   normal cursor target (A on it plays the disc, A on a core
+		   loads the core - no button conflict) and a stable fixture
+		   rather than something that pops in at the top.
+		   - keyed on the RBF extension, not the SCANO_CORES bit alone:
+		     that bit is also set for the multiboot .txt sub-browser
+		     (fs_pFileExt "TXT"), where the row must NOT appear.
+		   - push_back (bottom) does not shift the real-core indices, so
+		     the reselect below stays correct.
+		   - added BEFORE the empty-list early return so the row shows
+		     even when a filter matches no cores. */
+		if ((options & SCANO_CORES) && extension && strcasestr(extension, "RBF"))
+		{
+			char row[256];
+			if (physcd_menu_row(row, sizeof(row)))
+			{
+				direntext_t d;
+				memset(&d, 0, sizeof(d));
+				snprintf(d.de.d_name, sizeof(d.de.d_name), "%s", PHYSCD_MENU_SENTINEL);
+				d.de.d_type = DT_REG;
+				snprintf(d.altname, sizeof(d.altname), "%s", row);
+				DirItem.push_back(d);
+			}
+		}
+
+		if (!flist_nDirEntries()) return 0;
+
 		if (file_name[0])
 		{
 			int pos = -1;
@@ -2001,6 +2033,23 @@ char* flist_Path()
 int flist_nDirEntries()
 {
 	return DirItem.size();
+}
+
+// physcd: reposition the cursor onto a named entry after a rescan, so a
+// live list rebuild (disc in/out) does not bounce the user to the top.
+// no-op if the name is not found.
+void flist_select_by_name(const char *name)
+{
+	if (!name || !name[0]) return;
+	for (int i = 0; i < (int)DirItem.size(); i++)
+	{
+		if (!strcmp(DirItem[i].de.d_name, name))
+		{
+			iSelectedEntry = i;
+			flist_center_selected();
+			return;
+		}
+	}
 }
 
 int flist_iFirstEntry()

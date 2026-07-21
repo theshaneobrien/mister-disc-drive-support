@@ -97,7 +97,9 @@ extern cdd_t cdd;
 
 
 void mcd_poll();
-void mcd_set_image(int num, const char *filename);
+// returns 1 if a disc actually mounted (autoboot needs to distinguish
+// that from merely recognising the core); void-context callers unaffected
+int mcd_set_image(int num, const char *filename);
 void mcd_reset();
 int mcd_send_data(uint8_t* buf, int len, uint8_t index);
 int mcd_can_send_data(uint8_t type);

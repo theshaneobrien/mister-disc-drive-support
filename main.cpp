@@ -26,6 +26,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <inttypes.h>
 #include <ctype.h>
 #include <string.h>
+#include <signal.h>
+#include <ucontext.h>
 #include "menu.h"
 #include "user_io.h"
 #include "input.h"
@@ -35,11 +37,41 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "osd.h"
 #include "offload.h"
 #include "achievements.h"
+#include "support/physcd/physcd_autoboot.h"
 
 const char *version = "$VER:" VDATE;
 
+// print the fault address plus pc/lr to stderr (unbuffered, survives)
+// and die with the default action so the shell still reports the
+// signal. pc/lr map to file:line via addr2line on the unstripped elf.
+static void fault_handler(int sig, siginfo_t *si, void *ctx)
+{
+	ucontext_t *uc = (ucontext_t *)ctx;
+	char msg[160];
+	int n = snprintf(msg, sizeof(msg),
+		"\n*** %s: addr=%p pc=0x%08lx lr=0x%08lx ***\n",
+		sig == SIGBUS ? "SIGBUS" : "SIGSEGV", si->si_addr,
+		(unsigned long)uc->uc_mcontext.arm_pc,
+		(unsigned long)uc->uc_mcontext.arm_lr);
+	if (n > 0) write(2, msg, n);
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
 int main(int argc, char *argv[])
 {
+	// line-buffer stdout even when redirected to a file: with the
+	// default 4KB block buffering a crash eats every queued printf,
+	// which turned a segfault hunt into archaeology during physcd
+	// bring-up. costs nothing on the serial console.
+	setvbuf(stdout, NULL, _IOLBF, 0);
+
+	struct sigaction sa = {};
+	sa.sa_sigaction = fault_handler;
+	sa.sa_flags = SA_SIGINFO;
+	sigaction(SIGSEGV, &sa, NULL);
+	sigaction(SIGBUS, &sa, NULL);
+
 	// Always pin main worker process to core #1 as core #0 is the
 	// hardware interrupt handler in Linux.  This reduces idle latency
 	// in the main loop by about 6-7x.
@@ -74,6 +106,11 @@ int main(int argc, char *argv[])
 	user_io_init((argc > 1) ? argv[1] : "",(argc > 2) ? argv[2] : NULL);
 	achievements_init();
 
+	// phase B of disc autoboot: if the menu process loaded us because a
+	// disc was inserted, it left a marker. nothing to do otherwise, so a
+	// core the user loaded by hand is never hijacked.
+	physcd_autoboot_startup();
+
 #ifdef USE_SCHEDULER
 	scheduler_init();
 	scheduler_run();
@@ -88,6 +125,7 @@ int main(int argc, char *argv[])
 		user_io_poll();
 		frame_timer();
 		input_poll(0);
+		physcd_autoboot_poll();
 		HandleUI();
 		OsdUpdate();
 	}

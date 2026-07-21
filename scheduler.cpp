@@ -10,6 +10,7 @@
 #include "profiling.h"
 #include "achievements.h"
 #include "video.h"
+#include "support/physcd/physcd_autoboot.h"
 
 static cothread_t co_scheduler = nullptr;
 static cothread_t co_poll = nullptr;
@@ -37,6 +38,7 @@ static void scheduler_co_poll(void)
 			input_poll(0);
 			achievements_poll();
 			video_poll();
+			physcd_autoboot_poll();
 		}
 
 		scheduler_yield();

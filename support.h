@@ -42,6 +42,10 @@
 // MEGACD  support
 #include "support/megacd/megacd.h"
 
+// physical CD-ROM support
+#include "support/physcd/mister_physcd.h"
+#include "support/physcd/physcd_autoboot.h"
+
 // C64 support
 #include "support/c64/c64.h"
 

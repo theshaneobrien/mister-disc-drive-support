@@ -7,6 +7,7 @@
 #include <time.h>   // clock_gettime, CLOCK_REALTIME
 #include "neogeo_loader.h"
 #include "neogeocd.h"
+#include "../physcd/mister_physcd.h"
 #include "../../sxmlc.h"
 #include "../../user_io.h"
 #include "../../fpga_io.h"
@@ -1140,9 +1141,15 @@ void load_neo(char *path)
 
 int neogeo_romset_tx(char* name, int cd_en)
 {
+	// a physical cd disc has no path: the game streams off the disc via
+	// the cdd, this call only loads the cd bios and system roms
+	int phys = !strcmp(name, PHYSCD_SENTINEL);
+	int cd_bios_ok = 1;   // set false if a chosen cd bios file is missing
+
 	char *romset = strrchr(name, '/');
-	if (!romset) return 0;
-	romset++;
+	if (romset) romset++;
+	else if (phys) romset = name;   // sentinel, keep going to load the bios
+	else return 0;
 
 	int system_mvs, system_cdz;
 	static char full_path[1024];
@@ -1235,14 +1242,21 @@ int neogeo_romset_tx(char* name, int cd_en)
 			}
 		} else {
 			fill_ram(128 * 1024, 0xAA);
+			// track whether a cd bios was actually found: for a physical
+			// disc a missing bios must be reported, or autoboot claims
+			// success and boots to a blank screen
 			sprintf(full_path, "%s/uni-bioscd.rom", home);
 			if (!(mask & 0x8000) && FileExists(full_path)) {
 				neogeo_tx(home, "uni-bioscd.rom", NEO_FILE_RAW, 0, 0, 0x80000);
 			} else if (!system_cdz) {
 				// NeoGeo CD
+				sprintf(full_path, "%s/top-sp1.bin", home);
+				cd_bios_ok = FileExists(full_path);
 				neogeo_tx(home, "top-sp1.bin", NEO_FILE_RAW, 0, 0, 0x80000);
 			} else {
 				// NeoGeo CDZ
+				sprintf(full_path, "%s/neocd.bin", home);
+				cd_bios_ok = FileExists(full_path);
 				neogeo_tx(home, "neocd.bin", NEO_FILE_RAW, 0, 0, 0x80000);
 			}
 		}
@@ -1269,10 +1283,13 @@ int neogeo_romset_tx(char* name, int cd_en)
 
 	notify_conf();
 
-	FileGenerateSavePath(name, (char*)full_path);
+	// physical disc has no game folder: fixed save name
+	FileGenerateSavePath(phys ? "physcd" : name, (char*)full_path);
 	user_io_file_mount((char*)full_path, 0, 1);
 
 	user_io_status_set("[0]", 0); // Release reset
 
-	return 1;
+	// 0 when a required cd bios was missing, so neocd_set_image can
+	// report the failure instead of claiming a successful mount
+	return cd_bios_ok;
 }

@@ -43,6 +43,7 @@ typedef struct
 	int end;
 	int last;
 	int sectorSize;
+	int phys;	// physical usb cd-rom drive (support/physcd), zero-init keeps cue/chd paths untouched
 	chd_file *chd_f;
 	int chd_hunksize;
 	cd_track_t tracks[100];

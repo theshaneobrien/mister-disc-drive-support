@@ -47,6 +47,7 @@ struct fileTextReader
 };
 
 int flist_nDirEntries();
+void flist_select_by_name(const char *name);
 int flist_iFirstEntry();
 void flist_iFirstEntryInc();
 int flist_iSelectedEntry();

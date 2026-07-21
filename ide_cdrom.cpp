@@ -50,6 +50,7 @@
 #define CD_ASC_CODE_COMMAND_SEQUENCE_ERR 0x2C
 #define CD_ASC_CODE_ILLEGAL_OPCODE 0x20
 #define CD_ASC_CODE_ILLEGAL_FIELD_CMD_PACKET 0x24
+#define CD_ASC_CODE_MEDIUM_MAY_HAVE_CHANGED 0x28
 
 
 typedef struct
@@ -1216,6 +1217,12 @@ static int get_sense(drive_t *drv)
 
 	default:
 		set_sense(drv->atapi_sense_key, drv->atapi_asc_code, drv->atapi_ascq_code);
+		if (drv->atapi_sense_key == CD_ERR_UNIT_ATTENTION)
+		{
+			drv->atapi_sense_key = 0;
+			drv->atapi_asc_code = 0;
+			drv->atapi_ascq_code = 0;
+		}
 		break;
 	}
 
@@ -1390,7 +1397,7 @@ void cdrom_handle_pkt(ide_config *ide)
 		dbg_printf("** Seek\n");
 		drv->playing = 0;
 		drv->paused = 0;
-		cdrom_reply(ide, 0);
+		cdrom_reply(ide, 0, 0, 0, true, ATA_STATUS_DSC);
 		break;
 
 	case 0x1B: //START STOP UNIT
@@ -1618,7 +1625,7 @@ int cdrom_handle_cmd(ide_config *ide)
 
 
 //error is the atapi sense_key
-void cdrom_reply(ide_config *ide, uint8_t error, uint8_t asc_code, uint8_t ascq_code, bool unit_attention)
+void cdrom_reply(ide_config *ide, uint8_t error, uint8_t asc_code, uint8_t ascq_code, bool unit_attention, uint8_t extra_status)
 {
 	ide->state = IDE_STATE_IDLE;
 	ide->regs.sector_count = 3;
@@ -1626,10 +1633,13 @@ void cdrom_reply(ide_config *ide, uint8_t error, uint8_t asc_code, uint8_t ascq_
 		ide->regs.status = ATA_STATUS_RDY | ATA_STATUS_IRQ | ATA_STATUS_ERR;
 		ide->regs.error = (CD_ERR_UNIT_ATTENTION << 4) | ATA_ERR_MC;
 		ide->drive[ide->regs.drv].mcr_flag = false;
+		ide->drive[ide->regs.drv].atapi_sense_key = CD_ERR_UNIT_ATTENTION;
+		ide->drive[ide->regs.drv].atapi_asc_code = CD_ASC_CODE_MEDIUM_MAY_HAVE_CHANGED;
+		ide->drive[ide->regs.drv].atapi_ascq_code = 0;
 	}
 	else
 	{
-		ide->regs.status = ATA_STATUS_RDY | ATA_STATUS_IRQ | (error ? ATA_STATUS_ERR : 0);
+		ide->regs.status = ATA_STATUS_RDY | ATA_STATUS_IRQ | (error ? ATA_STATUS_ERR : 0) | extra_status;
 		ide->regs.error = error << 4;
 		ide->drive[ide->regs.drv].atapi_sense_key = error;
 		ide->drive[ide->regs.drv].atapi_asc_code = asc_code;

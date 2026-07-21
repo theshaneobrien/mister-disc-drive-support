@@ -40,6 +40,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <pthread.h>
 #include <libgen.h>
 #include <bluetooth.h>
 #include <hci.h>
@@ -233,6 +234,8 @@ static uint32_t menu_timer = 0;
 static uint32_t menu_save_timer = 0;
 static uint32_t load_addr = 0;
 static int32_t  bt_timer = 0;
+static bool     bt_present = false;
+static bool     bt_pairing = false;
 
 static bool osd_unlocked = 1;
 static char osd_code_entry[32];
@@ -1083,6 +1086,12 @@ void build_advanced_map_summary(advancedButtonMap *abm, char *dest_str, size_t d
 	snprintf(dest_str, dest_size, "%s->%s", input_str, output_str);
 }
 
+static void *close_pipe_async(void *arg)
+{
+	pclose((FILE *)arg);
+	return NULL;
+}
+
 void HandleUI(void)
 {
 	PROFILE_FUNCTION();
@@ -1100,6 +1109,16 @@ void HandleUI(void)
 				printf("*** reset bt ***\n");
 				system("/bin/bluetoothd hcireset &");
 			}
+		}
+	}
+
+	{
+		static unsigned long bt_icon_timer = 0;
+		if (!bt_pairing && (!bt_icon_timer || CheckTimer(bt_icon_timer)))
+		{
+			bt_present = (hci_get_route(0) >= 0);
+			bt_icon_timer = GetTimer(3000);
+			if (!bt_icon_timer) bt_icon_timer = 1;
 		}
 	}
 
@@ -1225,6 +1244,10 @@ void HandleUI(void)
 	recent = false;
 
 	if (c && cfg.bootcore[0] != '\0') cfg.bootcore[0] = '\0';
+
+	// same courtesy for disc autoboot: any key abandons it, so a disc
+	// left in the drive can never trap the user out of the menu
+	if (c) physcd_autoboot_cancel();
 
 	if (!select_ini && is_menu() && cfg.osd_timeout >= 5)
 	{
@@ -5391,7 +5414,7 @@ void HandleUI(void)
 
 		if (menu)
 		{
-			if (flist_nDirEntries() && flist_SelectedItem()->de.d_type != DT_DIR)
+			if (flist_nDirEntries() && flist_SelectedItem()->de.d_type != DT_DIR && !physcd_is_menu_row(flist_SelectedItem()->de.d_name))
 			{
 				SelectedDir[0] = 0;
 				if (strlen(selPath))
@@ -5508,6 +5531,15 @@ void HandleUI(void)
 				static char name[256];
 				char type = flist_SelectedItem()->de.d_type;
 				memcpy(name, flist_SelectedItem()->de.d_name, sizeof(name));
+
+				// physcd: the pinned "Play Disc" row is a synthetic
+				// entry, not a file - load the physical disc instead of
+				// trying to open it as a core (execs on success)
+				if (physcd_is_menu_row(name))
+				{
+					physcd_autoboot_load_disc();
+					break;
+				}
 
 				if ((fs_Options & SCANO_UMOUNT) && (is_megacd() || is_pce() || is_cdi() || is_neogeo() || (is_psx() && !(fs_Options & SCANO_SAVES)) || is_saturn() || is_3do()) && type == DT_DIR && strcmp(flist_SelectedItem()->de.d_name, ".."))
 				{
@@ -7176,6 +7208,7 @@ void HandleUI(void)
 		sched_setaffinity(0, sizeof(set), &set);
 		if (parentstate == MENU_BTPAIR)
 		{
+			bt_pairing = true;
 			OsdUpdate();
 			if(cfg.bt_reset_before_pair) system("hciconfig hci0 reset");
 			script_pipe = popen("/usr/sbin/btpair", "r");
@@ -7223,9 +7256,13 @@ void HandleUI(void)
 			if (!script_finished)
 			{
 				strcpy(script_command, "killall ");
-				strcat(script_command, (parentstate == MENU_BTPAIR) ? "-SIGINT btctl" : flist_SelectedItem()->de.d_name);
+				strcat(script_command, (parentstate == MENU_BTPAIR) ? "-SIGINT btpair btctl" : flist_SelectedItem()->de.d_name);
 				system(script_command);
-				pclose(script_pipe);
+				FILE *p = script_pipe;
+				script_pipe = NULL;
+				pthread_t tid;
+				if (!pthread_create(&tid, NULL, close_pipe_async, p)) pthread_detach(tid);
+				else { printf("close_pipe_async: pthread_create failed\n"); pclose(p); }
 				cpu_set_t set;
 				CPU_ZERO(&set);
 				CPU_SET(1, &set);
@@ -7245,6 +7282,7 @@ void HandleUI(void)
 			{
 				if (parentstate == MENU_BTPAIR)
 				{
+					bt_pairing = false;
 					menustate = MENU_NONE1;
 				}
 				else
@@ -7706,9 +7744,43 @@ void HandleUI(void)
 
 		if (!rtc_timer || CheckTimer(rtc_timer))
 		{
-			rtc_timer = GetTimer(cfg.bootcore[0] != '\0' ? 100 : 1000);
 			char str[64] = { 0 };
 			char straux[64];
+
+			// tick FIRST, then arm the timer from the resulting state:
+			// sampling busy() beforehand means the pass that starts a
+			// banner has already scheduled the slow 1000ms wake, so the
+			// first banner frame would hold for a second
+			physcd_autoboot_menu_tick();
+
+			// a disc went in or out while sitting on the core browser:
+			// rebuild the list so the Play Disc row appears/disappears
+			// without the user having to navigate away and back.
+			// - state/ext guards come BEFORE physcd_menu_dirty() so its
+			//   edge is consumed only when we can act on it (else an edge
+			//   arriving in another state is lost and the row never updates)
+			// - RBF gate keeps this off the multiboot .txt sub-browser
+			// - skip while autoboot is drawing its banner (rows 12-15),
+			//   the rebuild's PrintDirectory would wipe it for a frame
+			if (menustate == MENU_FILE_SELECT2 && (fs_Options & SCANO_CORES)
+				&& strcasestr(fs_pFileExt, "RBF") && !physcd_autoboot_busy()
+				&& physcd_menu_dirty())
+			{
+				// remember the selected core so the rebuild does not
+				// bounce the cursor to the top (skip if it is our row)
+				static char keep[256];
+				keep[0] = 0;
+				if (flist_nDirEntries() && !physcd_is_menu_row(flist_SelectedItem()->de.d_name))
+					snprintf(keep, sizeof(keep), "%s", flist_SelectedItem()->de.d_name);
+
+				ScanDirectory(selPath, SCANF_INIT, fs_pFileExt, fs_Options, NULL, filter[0] ? filter : NULL);
+				flist_select_by_name(keep);
+				menustate = MENU_FILE_SELECT1;
+			}
+
+			// physcd autoboot needs the fast tick too: its banner has to
+			// get screen time before fpga_load_rbf disables the osd
+			rtc_timer = GetTimer((cfg.bootcore[0] != '\0' || physcd_autoboot_busy()) ? 100 : 1000);
 
 			if (cfg.bootcore[0] != '\0')
 			{
@@ -7767,7 +7839,7 @@ void HandleUI(void)
 				int n = 8;
 				if (getNet(2)) str[n++] = 0x1d;
 				if (getNet(1)) str[n++] = 0x1c;
-				if (hci_get_route(0) >= 0) str[n++] = 4;
+				if (bt_present) str[n++] = 4;
 				if (user_io_get_sdram_cfg() & 0x8000)
 				{
 					switch (user_io_get_sdram_cfg() & 7)

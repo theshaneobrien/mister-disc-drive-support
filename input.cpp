@@ -30,6 +30,7 @@
 #include "audio.h"
 #include "joymapping.h"
 #include "support.h"
+#include "support/physcd/mister_physcd.h"
 #include "profiling.h"
 #include "gamecontroller_db.h"
 #include "str_util.h"
@@ -6263,6 +6264,24 @@ int input_test(int getchar)
 						if (!strcmp(cmd + 7, "mute")) set_volume(0x81);
 						else if (!strcmp(cmd + 7, "unmute")) set_volume(0x80);
 						else if (cmd[7] >= '0' && cmd[7] <= '7') set_volume(0x40 - 0x30 + cmd[7]);
+					}
+					else if (!strncmp(cmd, "mount_phys", 10) &&
+						(cmd[10] == '\0' || cmd[10] == ' ' || cmd[10] == '\t'))
+					{
+						// mount_phys [n] - mount the physical cd drive into the
+						// running cd core. n pins /dev/srN; bare autodetects.
+						// the terminator check keeps "mount_physical" and the
+						// like from mounting AND silently unpinning the device.
+						const char *p = cmd + 10;
+						while (*p == ' ' || *p == '\t') p++;
+
+						char dev[64] = "";
+						if (*p >= '0' && *p <= '9') snprintf(dev, sizeof(dev), "/dev/sr%c", *p);
+						physcd_set_device(dev);
+
+						// shared with autoboot phase B so the two paths
+						// cannot drift apart as cores are added
+						physcd_mount_current_core();
 					}
 				}
 			}

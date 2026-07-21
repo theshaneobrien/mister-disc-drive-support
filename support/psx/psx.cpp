@@ -5,6 +5,7 @@
 #include <inttypes.h>
 
 #include "../../file_io.h"
+#include "../physcd/mister_physcd.h"
 #include "../../user_io.h"
 #include "../../spi.h"
 #include "../../hardware.h"
@@ -109,7 +110,12 @@ static void unload_chd(toc_t *table)
 	{
 		chd_close(table->chd_f);
 	}
+	/* NULL after free: upstream got away without it because load_chd/
+	   load_cue always reallocate straight after, but load_phys does
+	   not - and a second unload_chd (e.g. the failure path of the
+	   same mount) would double-free and abort the process. */
 	if (chd_hunkbuf) free(chd_hunkbuf);
+	chd_hunkbuf = NULL;
 	memset(table, 0, sizeof(toc_t));
 	chd_hunknum = -1;
 
@@ -330,8 +336,57 @@ static int load_cue(const char* filename, toc_t *table)
 	return 1;
 }
 
+static void unload_phys(toc_t *table)
+{
+	if (table->phys) physcd_close();
+	memset(table, 0, sizeof(toc_t));
+}
+
+static int load_phys(toc_t *table)
+{
+	/* release whatever was mounted before */
+	if (table->chd_f) unload_chd(table);
+	else if (table->phys) unload_phys(table);
+	else unload_cue(table);
+
+	if (physcd_open(NULL) || physcd_load_toc(table) || !table->last)
+	{
+		/* close on failure: table->phys is not set on this path, so
+		   the unmount path would leave the fd, the prefetch thread
+		   and the 9.5MB cache alive with nothing mounted */
+		physcd_close();
+		return 0;
+	}
+
+	/* physcd reports drive-absolute lbas with EXCLUSIVE ends (what
+	 * megacd wants). psx wants inclusive ends and the same faked
+	 * 150-sector pregap load_chd applies, so that core lba 150 is the
+	 * first sector of track 1. shifting every track by the same 150
+	 * keeps one uniform bias, so psx_read_cd subtracts 150 and hands
+	 * the drive its own addressing back.
+	 *
+	 * indexes[1] stays 0 on tracks after the first: the drive reports
+	 * each start as its INDEX 1 position, so no further correction is
+	 * wanted. pregap stays 0 too - unlike a cue whose file omits the
+	 * gap, a real disc has those sectors and can just read them.
+	 */
+	for (int i = 0; i < table->last; i++)
+	{
+		int len = table->tracks[i].end - table->tracks[i].start;
+
+		table->tracks[i].indexes[1] = i ? 0 : 150;
+		table->tracks[i].pregap = 0;
+		table->tracks[i].start += 150;
+		table->tracks[i].end = table->tracks[i].start + len - 1;
+	}
+	table->end = table->tracks[table->last - 1].end + 1;
+
+	return 1;
+}
+
 static int load_cd_image(const char *filename, toc_t *table)
 {
+	if (!strcmp(filename, PHYSCD_SENTINEL)) return load_phys(table);
 
 	const char *ext = strrchr(filename, '.');
 	if (!ext) return 0;
@@ -488,7 +543,13 @@ void psx_read_cd(uint8_t *buffer, int lba, int cnt)
 			{
 				if (lba >= toc.tracks[i].start && lba <= toc.tracks[i].end)
 				{
-					if (!toc.chd_f)
+					if (toc.phys)
+					{
+						/* give the prefetch the head start the core's
+						   own modeled seek latency is about to cover */
+						physcd_seek_hint(lba - toc.tracks[0].indexes[1]);
+					}
+					else if (!toc.chd_f)
 					{
 						if (toc.tracks[i].offset)
             {
@@ -511,6 +572,15 @@ void psx_read_cd(uint8_t *buffer, int lba, int cnt)
 
               memset(buffer, 0x0, CD_SECTOR_LEN);
             }
+            else if (toc.phys)
+						{
+							// same 150-sector bias the chd branch undoes below.
+							// NO byteswap: the drive returns cdda little-endian
+							// like a bin file, only chd stores it big-endian.
+							int read_lba = lba - toc.tracks[0].indexes[1];
+							if (physcd_read_sector(read_lba, buffer, NULL))
+								memset(buffer, 0, CD_SECTOR_LEN);
+						}
             else if (toc.chd_f)
 						{
 
@@ -681,11 +751,12 @@ static int load_bios(const char* filename)
 	return user_io_file_tx(filename, 0xC0);
 }
 
-void psx_mount_cd(int f_index, int s_index, const char *filename)
+int psx_mount_cd(int f_index, int s_index, const char *filename)
 {
 	static char last_dir[1024] = {};
 
 	int loaded = 0;
+	int phys = !strcmp(filename, PHYSCD_SENTINEL);
 
 	if (strlen(filename))
 	{
@@ -699,21 +770,41 @@ void psx_mount_cd(int f_index, int s_index, const char *filename)
 				region = game_info.region;
 			printf("Game ID: %s, region: %s\n", game_id, region_string(region));
 
+			/* region and game id come from the disc itself, so they
+			   work on a physical mount with no extra plumbing. the
+			   sentinel is not a usable path though - it has no folder
+			   and its characters are illegal on exFAT - so stand in
+			   the disc's own game id. that gives each physical game
+			   its own memory card and savestates rather than one
+			   shared blob. */
+			static char phys_name[64];
+			if (phys)
+			{
+				snprintf(phys_name, sizeof(phys_name), "%s",
+					(game_id && game_id[0]) ? game_id : "physcd");
+			}
+			const char *name = phys ? phys_name : filename;
+
 			// Write game ID if it's not empty (BIOS check is handled in user_io_write_gameid)
 			if (game_id && game_id[0] != '\0')
 			{
-				user_io_write_gameid(filename, 0, game_id);
+				user_io_write_gameid(name, 0, game_id);
 			}
 
-			int name_len = strlen(filename);
+			int name_len = strlen(name);
 
 			if (toc.tracks[0].type) // is first track a data?
 			{
-				const char *p = strrchr(filename, '/');
-				int cur_len = p ? p - filename : 0;
+				const char *p = strrchr(name, '/');
+				int cur_len = p ? p - name : 0;
 				int old_len = strlen(last_dir);
 
-				int same_game = old_len && (cur_len == old_len) && !strncmp(last_dir, filename, old_len);
+				int same_game = old_len && (cur_len == old_len) && !strncmp(last_dir, name, old_len);
+
+				/* one fixed sentinel would always look like the same
+				   game, so a physical mount always re-inits (and a
+				   failed one can recover) */
+				if (phys) same_game = 0;
 
 				if (!same_game)
 				{
@@ -724,12 +815,12 @@ void psx_mount_cd(int f_index, int s_index, const char *filename)
 					}
 					reset = !noreset;
 
-					strcpy(last_dir, filename);
+					strcpy(last_dir, name);
 					char *p = strrchr(last_dir, '/');
 					if (p) *p = 0;
 					else *last_dir = 0;
 
-					if (reset)
+					if (reset && !phys)
 					{
 						int bios_loaded = 0;
 
@@ -755,7 +846,10 @@ void psx_mount_cd(int f_index, int s_index, const char *filename)
 
 					}
 
-					if (!(user_io_status_get("[63]"))) psx_mount_save(last_dir);
+					/* file games key the memory card off the game
+					   FOLDER; a physical disc has none, so key it off
+					   the game id instead */
+					if (!(user_io_status_get("[63]"))) psx_mount_save(phys ? name : last_dir);
 				}
 			}
 
@@ -768,7 +862,7 @@ void psx_mount_cd(int f_index, int s_index, const char *filename)
 			sprintf(buf, "%s/sbi.zip/%s.sbi", HomeDir(), game_id);
 			has_sbi_file = (FileOpen(&sbi_file, buf, 1));
 
-			if (!has_sbi_file)
+			if (!has_sbi_file && !phys)
 			{
 				// search for .sbi file base on image name
 				strcpy(buf, filename);
@@ -782,7 +876,7 @@ void psx_mount_cd(int f_index, int s_index, const char *filename)
 				mask = libCryptMask(&sbi_file);
 			}
 
-			process_ss(filename, name_len != 0);
+			process_ss(name, name_len != 0);
 			send_cue_and_metadata(&toc, mask, region, reset);
 
 			user_io_set_index(f_index);
@@ -795,10 +889,14 @@ void psx_mount_cd(int f_index, int s_index, const char *filename)
 	if (!loaded)
 	{
 		printf("Unmount CD\n");
+		if (toc.phys) unload_phys(&toc);
 		unload_cue(&toc);
 		unload_chd(&toc);
 		mount_cd(0, s_index);
 	}
+
+	// autoboot needs to know whether a disc actually mounted
+	return loaded;
 }
 
 void psx_poll()

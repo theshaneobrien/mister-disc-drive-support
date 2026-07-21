@@ -7,6 +7,7 @@
 #include "saturn.h"
 #include "../../shmem.h"
 #include "../chd/mister_chd.h"
+#include "../physcd/mister_physcd.h"
 
 #define SHMEM_ADDR  0x31000000
 
@@ -322,7 +323,18 @@ int satcdd_t::Load(const char *filename)
 	Unload();
 
 	const char *ext = filename + strlen(filename) - 4;
-	if (!strncasecmp(".cue", ext, 4))
+	if (!strcmp(filename, PHYSCD_SENTINEL))
+	{
+		if (physcd_open(NULL) || physcd_load_toc(&this->toc))
+		{
+			physcd_close();
+			printf("\x1b[32mSaturn: no readable physical disc\n\x1b[0m");
+			return (-1);
+		}
+		/* raw drive reads always deliver 2352-byte sectors */
+		this->sectorSize = 2352;
+	}
+	else if (!strncasecmp(".cue", ext, 4))
 	{
 		if (LoadCUE(filename)) {
 			return (-1);
@@ -398,6 +410,11 @@ void satcdd_t::Unload()
 {
 	if (this->loaded)
 	{
+		if (this->toc.phys)
+		{
+			physcd_close();
+		}
+
 		if (this->toc.chd_f)
 		{
 			chd_close(this->toc.chd_f);
@@ -439,11 +456,18 @@ int satcdd_t::GetBootHeader(uint8_t *buf) {
 		offset = 0;
 	}
 
-	if (this->toc.chd_f)
+	if (this->toc.phys)
+	{
+		/* boot header lives at offset 16 in the raw first data sector */
+		uint8_t raw[2352];
+		if (physcd_read_sector(this->toc.tracks[0].start, raw, NULL)) return -1;
+		memcpy(buf, raw + 16, 256);
+	}
+	else if (this->toc.chd_f)
 	{
 		mister_chd_read_sector(this->toc.chd_f, 0, 0, offset, 256, buf, this->chd_hunkbuf, &this->chd_hunknum);
 	}
-	else 
+	else
 	{
 		if (this->toc.tracks[0].f.opened())
 		{
@@ -601,6 +625,9 @@ void satcdd_t::CommandExec() {
 		this->lba = fad - 150 - 4;
 		this->chd_audio_read_lba = this->lba;
 
+		/* start the prefetch now, during the modeled seek delay below */
+		if (this->toc.phys) physcd_seek_hint(this->lba);
+
 		this->track = this->toc.GetTrackByLBA(this->seek_lba);
 		this->index = this->toc.GetIndexByLBA(this->track, this->seek_lba);
 
@@ -641,6 +668,8 @@ void satcdd_t::CommandExec() {
 
 		this->seek_lba = fad - 150;
 		this->lba = fad - 150;
+
+		if (this->toc.phys) physcd_seek_hint(this->lba);
 
 		this->track = this->toc.GetTrackByLBA(this->seek_lba);
 		this->index = this->toc.GetIndexByLBA(this->track, this->seek_lba);
@@ -1194,7 +1223,13 @@ void satcdd_t::ReadData(uint8_t *buf)
 	if (this->toc.tracks[this->track].type)
 	{
 		int lba_ = this->lba >= 0 ? this->lba : 0;
-		if (this->toc.chd_f)
+		if (this->toc.phys)
+		{
+			/* raw 2352 sector straight into buf, same as the 2352 file
+			   path below - no byteswap, no header skip */
+			physcd_read_sector(lba_, buf, NULL);
+		}
+		else if (this->toc.chd_f)
 		{
 			int read_offset = 0;
 			if (this->toc.tracks[this->track].sector_size == 2048)
@@ -1230,7 +1265,16 @@ int satcdd_t::ReadCDDA(uint8_t *buf, int first)
 	int sec_offs = first ? 0 : 1;
 
 	uint8_t *dest = buf;
-	if (this->toc.chd_f)
+	if (this->toc.phys)
+	{
+		/* drive returns cdda little-endian like a bin file: mirror the
+		   file branch, NO byteswap (that is chd-only) */
+		for (int i = sec_offs; i < 2; i++, dest += 4096)
+		{
+			physcd_read_sector(this->chd_audio_read_lba + i, dest, NULL);
+		}
+	}
+	else if (this->toc.chd_f)
 	{
 		for (int i = sec_offs; i < 2; i++, dest += 4096)
 		{

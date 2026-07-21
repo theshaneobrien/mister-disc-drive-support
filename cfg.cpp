@@ -67,6 +67,11 @@ static const ini_var_t ini_vars[] =
 	{ "MENU_PAL", (void*)(&(cfg.menu_pal)), UINT8, 0, 1 },
 	{ "BOOTCORE", (void*)(&(cfg.bootcore)), STRING, 0, sizeof(cfg.bootcore) - 1 },
 	{ "BOOTCORE_TIMEOUT", (void*)(&(cfg.bootcore_timeout)), INT16, 2, 30 },
+	// physcd: only [MiSTer] is read while the menu core runs, so these
+	// must not be put in a per-core section to take effect at the menu
+	{ "PHYSCD_AUTOBOOT", (void*)(&(cfg.physcd_autoboot)), UINT8, 0, 1 },
+	{ "PHYSCD_MOUNT_DELAY", (void*)(&(cfg.physcd_mount_delay)), UINT8, 0, 30 },
+	{ "PHYSCD_ACOUSTIC", (void*)(&(cfg.physcd_acoustic)), UINT8, 0, 1 },
 	{ "FONT", (void*)(&(cfg.font)), STRING, 0, sizeof(cfg.font) - 1 },
 	{ "FB_SIZE", (void*)(&(cfg.fb_size)), UINT8, 0, 4 },
 	{ "FB_TERMINAL", (void*)(&(cfg.fb_terminal)), UINT8, 0, 1 },
@@ -605,6 +610,9 @@ void cfg_parse()
 	cfg.hdmi_cec_power_on = 1;
 	cfg.hdr_max_nits = 1000;
 	cfg.hdr_avg_nits = 250;
+	cfg.physcd_autoboot = 1;	// this is the physcd fork; on is the point of it
+	cfg.physcd_mount_delay = 2;
+	cfg.physcd_acoustic = 0;	// prototype, off unless asked for
 	cfg.video_brightness = 50;
 	cfg.video_contrast = 50;
 	cfg.video_saturation = 100;

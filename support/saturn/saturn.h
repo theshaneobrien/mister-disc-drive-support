@@ -116,7 +116,7 @@ extern uint32_t saturn_frame_cnt;
 #define SAVE_IO_INDEX		0x4 // fake download to trigger save loading
 
 void saturn_poll();
-void saturn_set_image(int num, const char *filename);
+int saturn_set_image(int num, const char *filename);
 void saturn_reset();
 void saturn_fill_blanksave(uint8_t *buffer, uint32_t lba);
 int saturn_send_data(uint8_t* buf, int len, uint8_t index);

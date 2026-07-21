@@ -8,3 +8,6 @@ Main_MiSTer/
 *.o
 physcdd
 physcd_probe.o
+
+# staged release binaries (built for gh release upload, not committed)
+release/

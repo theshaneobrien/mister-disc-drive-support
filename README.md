@@ -83,7 +83,9 @@ PHYSCD_DEVICE=        ; optional, pin one drive such as /dev/sr1, blank means au
 
 ## RetroAchievements
 
-The RA build is the disc loader dropped into the MiSTer RetroAchievements setup, so it wants the RA patched cores, not stock ones. The easy way in is MiSTer Companion, which installs odelot's binary and the patched cores into _RA_Cores. Install that first, then drop the Disc plus RetroAchievements binary over /media/fat/MiSTer. When it boots a disc the loader prefers the patched core from _RA_Cores, so achievements can actually fire.
+The RA build is the disc loader merged into the MiSTer RetroAchievements setup, so it wants the RA patched cores, not stock ones. That whole setup is [odelot's RetroAchievements fork](https://github.com/odelot/Main_MiSTer) of Main_MiSTer, and our RA build sits right on top of it. All the credit for the RetroAchievements side belongs there.
+
+The easy way to get it onto your MiSTer is [MiSTer Companion](https://mistercompanion.org), which has a RetroAchievements Cores option that installs odelot's binary and the patched cores for you. That is how I set mine up and it just worked. If you would rather use a script there is also [mister-fpga-retroachievements](https://github.com/manyhats-mike/mister-fpga-retroachievements), which installs the same odelot build. Either way, get RetroAchievements working with a ripped game first so you know the stack is set up, then drop the Disc plus RetroAchievements binary over /media/fat/MiSTer. When it boots a disc the loader prefers the patched core, so achievements can actually fire.
 
 One real limit worth knowing. RetroAchievements matches a game by hashing the disc, and that hash has to match the set in the RA database, which is built against the unmodified retail disc. Retail discs that RA already supports work. Anything that needs a patch to get its achievements will not match from a physical disc, because we read the disc exactly as pressed and cannot change it. Europe Sonic CD is one of those, its set needs a patch, so it will not identify off the disc.
 

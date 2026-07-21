@@ -605,6 +605,11 @@ static void *prefetch_thread(void *arg)
 				pthread_mutex_unlock(&pcd.io);
 				pcd.swapping = 0;
 				if (ok) {
+					/* publish the reloaded trk[]/leadout BEFORE the swap_ready
+					   flag the poll thread gates on, so a weakly-ordered arm
+					   core cannot observe the flag with a stale toc (matches the
+					   prewarm arm; physcd_swap_consume pairs the acquire side) */
+					__sync_synchronize();
 					pcd.swap_ready = 1;
 					swap_ejected = 0;
 					printf("physcd: disc swap - new toc loaded\n");
@@ -836,6 +841,10 @@ int physcd_swap_consume(void)
 {
 	int r = pcd.swap_ready;
 	pcd.swap_ready = 0;
+	/* acquire: pair the prefetch thread's release fence so a caller that sees
+	   the flag also sees the reloaded trk[]/leadout before it reads them via
+	   physcd_current_toc (all swap consumers - psx + the cdd cores) */
+	if (r) __sync_synchronize();
 	return r;
 }
 

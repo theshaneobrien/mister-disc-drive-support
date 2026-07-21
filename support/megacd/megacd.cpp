@@ -26,6 +26,24 @@ void mcd_poll()
 	static uint32_t poll_timer = 0;
 	static uint8_t last_req = 255;
 	static uint8_t adj = 0;
+	static uint32_t swap_close_at = 0;
+
+	/* a physically-swapped disc: adopt its toc (cached, no drive read) and
+	   pulse the tray OPEN->STOP so the bios/game re-scans it. runs every poll,
+	   before the timer gate, so the dwell is honoured. */
+	if (cdd.is_phys() && physcd_swap_consume() && cdd.SwapPhys())
+	{
+		cdd.isData = 1;
+		cdd.status = CD_STAT_OPEN;      // lid-open pulse (matches the initial-mount OPEN)
+		cdd.latency = 0;
+		swap_close_at = GetTimer(PHYSCD_SWAP_DWELL_MS);
+	}
+	if (cdd.is_phys() && swap_close_at && CheckTimer(swap_close_at))   // is_phys: never touch a later image mount
+	{
+		swap_close_at = 0;
+		cdd.status = cdd.loaded ? CD_STAT_STOP : CD_STAT_NO_DISC;   // lid closed, new disc present
+		cdd.latency = 10;
+	}
 
 	if (!poll_timer || CheckTimer(poll_timer))
 	{
@@ -124,6 +142,7 @@ int mcd_set_image(int num, const char *filename)
 	(void)num;
 
 	cdd.Unload();
+	physcd_swap_enable(0);              // any remount/unmount disarms swap detection
 	cdd.status = CD_STAT_OPEN;
 
 	int phys = !strcmp(filename, PHYSCD_SENTINEL);
@@ -238,6 +257,7 @@ int mcd_set_image(int num, const char *filename)
 			cdd.latency = 10;
 			cdd.SendData = mcd_send_data;
 			cdd.CanSendData = mcd_can_send_data;
+			if (phys) physcd_swap_enable(1);   // arm mid-mount physical disc-swap detection
 
 			if (!same_game)
 			{

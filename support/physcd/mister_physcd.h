@@ -29,6 +29,11 @@
 #define PHYSCD_RAW  2352
 #define PHYSCD_SUB  96
 
+// tray open->close dwell (ms) the cdd cores pulse on a physical disc swap so
+// the bios/game re-scans the new toc. a hardware-tuning knob: long enough for
+// a slow-polling bios to observe the lid move, short enough to read as a flash.
+#define PHYSCD_SWAP_DWELL_MS 500
+
 // pick the drive for the next physcd_open(). pass a path ("/dev/sr1")
 // to pin one, or NULL/"" to autodetect. usb enumeration order is not
 // stable across reboots, so autodetect is the default.

@@ -406,6 +406,43 @@ int satcdd_t::Load(const char *filename)
 	return 0;
 }
 
+/* adopt a disc that was physically swapped mid-mount. the physcd backend has
+   already re-read the new disc's toc on its prefetch thread and invalidated
+   the cache; this pulls that CACHED toc (physcd_current_toc = NO drive read,
+   safe on the poll/fpga thread) and swaps it in, then emits the disc-change
+   STOP transition (lid_open=false, stop_pend=true) that Load's tail uses - the
+   next Process() sends SATURN_STAT_STOP carrying the new toc, the same
+   transition the proven reset-off OSD swap produces. no Reset (keeps
+   SendData), no Unload (would physcd_close the live drive), backup untouched. */
+int satcdd_t::SwapPhys()
+{
+	toc_t nt = {};
+	if (physcd_current_toc(&nt) || !nt.last) return 0;   // won't fire here: backend clears pcd.swapping before swap_ready
+	memcpy(&this->toc, &nt, sizeof(this->toc));           // phys->phys, verbatim (no bias, no open handles)
+	this->sectorSize = 2352;
+	this->toc.tracks[this->toc.last].start = this->toc.end;   // Load tail
+	this->loaded = 1;
+	/* clear stale playback/seek state - Reset's position half - so a leftover
+	   high lba from a longer previous disc cannot index past the new toc. */
+	this->state = Stop;
+	this->track = 0;
+	this->lba = 0;
+	this->seek_lba = 0;
+	this->speed = 0;
+	this->audioLength = 0;
+	this->audioFirst = 0;
+	this->chd_audio_read_lba = 0;
+	this->seek_pend = false;
+	this->read_pend = false;
+	this->pause_pend = false;
+	this->read_toc = false;
+	this->seek_ring = false;
+	this->seek_ring2 = false;
+	this->lid_open = false;
+	this->stop_pend = true;
+	return 1;
+}
+
 void satcdd_t::Unload()
 {
 	if (this->loaded)

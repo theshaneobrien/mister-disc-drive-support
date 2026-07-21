@@ -765,6 +765,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 
 	int loaded = 0;
 	int phys = !strcmp(filename, PHYSCD_SENTINEL);
+	physcd_swap_enable(0);   // normalize swap detection on entry, like the cdd cores
 	if (phys) { s_swap_fidx = f_index; s_swap_sidx = s_index; }
 
 	if (strlen(filename))

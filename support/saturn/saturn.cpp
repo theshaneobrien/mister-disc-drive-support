@@ -46,6 +46,11 @@ void saturn_poll()
 	static unsigned long poll_timer = 0;
 	static uint8_t last_req = 255;
 
+	/* a physically-swapped disc: adopt its toc (cached, no drive read) and emit
+	   the disc-change STOP transition so a running game / the bios cd player
+	   re-reads the new toc. */
+	if (satcdd.is_phys() && physcd_swap_consume()) satcdd.SwapPhys();
+
 	if (!poll_timer || CheckTimer(poll_timer))
 	{
 		poll_timer = GetTimer(0);
@@ -166,6 +171,7 @@ int saturn_set_image(int num, const char *filename)
 
 	satcdd.Unload();
 	satcdd.Reset();
+	physcd_swap_enable(0);              // any remount/unmount disarms swap detection
 
 	int same_game = *filename && *last_dir && !strncmp(last_dir, filename, strlen(last_dir));
 	/* the phys sentinel is one fixed string, so a remount always looks
@@ -214,6 +220,7 @@ int saturn_set_image(int num, const char *filename)
 		{
 			mounted = 1;
 			satcdd.SendData = saturn_send_data;
+			if (phys) physcd_swap_enable(1);   // arm mid-mount physical disc-swap detection
 
 			if (!same_game && reset_after_insert_disc)
 			{

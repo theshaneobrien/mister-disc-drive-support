@@ -89,6 +89,8 @@ The easy way to get it onto your MiSTer is [MiSTer Companion](https://mistercomp
 
 One real limit worth knowing. RetroAchievements matches a game by hashing the disc, and that hash has to match the set in the RA database, which is built against the unmodified retail disc. Retail discs that RA already supports work. Anything that needs a patch to get its achievements will not match from a physical disc, because we read the disc exactly as pressed and cannot change it. Europe Sonic CD is one of those, its set needs a patch, so it will not identify off the disc.
 
+Worth checking before you count on a game. On the RetroAchievements site, search for the game, open its page, and click Supported Game Hashes. That lists the exact discs the set was built against, usually with the region and revision noted, so you can see if your copy is likely to match. It is not a cast iron guarantee, games have several pressings and revisions and only the listed ones will identify, but it is the quickest way to know before you burn or insert a disc. If yours is not listed it will still boot and play, it just will not start an achievement session.
+
 Set the core Region to Auto, same as always. Softcore is the easy way to confirm a game identifies. Hardcore is stricter but works fine once the game is recognised.
 
 ## It is a fork, and it stays one

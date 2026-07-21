@@ -1,12 +1,15 @@
 # MiSTer USB CDROM Loader
 
-Load almost any CD game on a MiSTer straight from a USB CD or DVD drive, no ripping. Put a disc in, play it. And if you want, earn RetroAchievements off the physical disc while you are at it.
+Load almost any CD game on a MiSTer straight from a USB CD or DVD drive, no ripping. Put a disc in, play it. Music CDs too, the MiSTer makes a rather nice CD player now. And if you want, earn RetroAchievements off the physical disc while you are at it.
 
 This is a fork of Main_MiSTer, the ARM/Linux side of MiSTer. All the work is in userspace, the FPGA never touches the drive, and the disc build leaves the cores stock. The ARM binary just answers the core's sector requests from the real disc instead of from a file on the SD card.
 
 ## Features
 
 * Play CD games straight from a USB drive, no ripping: MegaCD, PlayStation, Saturn, NeoGeo CD, and 3DO.
+* Disc swapping. A multi disc PlayStation game asks for the next disc, you swap it, it keeps playing. No buttons.
+* Vib Ribbon with your own music. Boot the game, swap in any album off your shelf, ride your record collection.
+* Audio CDs. Put a music disc in and the MiSTer boots a console's built in CD player. Swap albums whenever.
 * The disc is detected automatically and the right core loads.
 * Autoboot when you drop a disc in, or a manual Play row in the menu.
 * RetroAchievements earned straight off the physical disc, on the RA build.
@@ -35,8 +38,10 @@ The disc side is identical in both.
 * Autoboot: drop a disc in at the menu and it loads the right core and mounts it, hands free.
 * Manual: a Play row at the bottom of the core list, so you load a disc when you want.
 * Acoustic seek: play a game off the SD card and a spare disc in the drive spins and seeks along with it, for the sound of a real console. Off by default, see Settings.
+* Disc swapping: PlayStation multi disc games just work, eject and insert, tested with Final Fantasy VII on retail discs. Vib Ribbon takes any album you feed it. See Disc swapping.
+* Audio CDs play in the PlayStation, Mega CD, Saturn, and NeoGeo CD players, with live album swapping. See Audio CDs.
 
-PC Engine CD and CD-i can be added the same way, I just have no discs to test with. Swapping discs mid game works, but it is untested for the games that need it.
+PC Engine CD and CD-i can be added the same way, I just have no discs to test with.
 
 ## What you need
 
@@ -79,6 +84,26 @@ echo mount_phys > /dev/MiSTer_cmd
 
 That mounts the drive into whatever CD core is already running.
 
+## Disc swapping
+
+Multi disc games work with real discs. On PlayStation you play until the game asks for the next disc, eject, put the next one in, and the game carries on by itself. Tested with Final Fantasy VII on retail discs, it just notices, no buttons, no menus.
+
+The one everyone should try is Vib Ribbon. Boot the game disc, then swap in any music CD you own and it builds levels from your album. Exactly like the real PlayStation, shelf of CDs and all.
+
+Saturn multi disc games take one extra step. The Saturn runs a disc change through its BIOS, so after you swap it checks the new disc and offers Start Application. Select that and the game carries on. Saturn multi disc games save before a swap as part of their normal flow, so nothing is lost. The console even reports Drive Door Open while the tray is out, which is a nice touch.
+
+Swaps are detected automatically from the physical eject and insert. On PlayStation there is also a fifo fallback if a game ever misses one:
+
+```
+echo swap_phys > /dev/MiSTer_cmd
+```
+
+## Audio CDs
+
+The MiSTer is now a CD player. Put a music CD in at the menu and it boots into a console's built in CD player, the same player the real hardware shipped with. PlayStation by default, and PHYSCD_AUDIO_CORE in MiSTer.ini picks the Saturn, Mega CD, or NeoGeo CD player instead if you prefer one of those.
+
+Swap albums live and the player picks up the new disc and its track list. The start of an audio disc is buffered while the drive spins up, so track one comes in clean.
+
 ## Settings
 
 In MiSTer.ini, under [MiSTer]:
@@ -88,6 +113,7 @@ PHYSCD_AUTOBOOT=1     ; 1 auto-loads a disc at the menu (default), 0 is manual, 
 PHYSCD_MOUNT_DELAY=2  ; seconds to let a core settle before mounting, raise it if a game misses the disc
 PHYSCD_DEVICE=        ; optional, pin one drive such as /dev/sr1, blank means autodetect
 PHYSCD_ACOUSTIC=0     ; 1 = a spare disc in the drive spins and seeks along with image games, see below
+PHYSCD_AUDIO_CORE=PSX ; which console's CD player an audio disc boots: PSX, MegaCD, Saturn, or NeoGeo
 ```
 
 ## Acoustic seek

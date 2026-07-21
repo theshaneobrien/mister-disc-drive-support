@@ -54,6 +54,10 @@
 #define READ_GIVEUP     6         // consecutive READ rejections -> seek-only fallback
 #define REOPEN_GIVEUP   8         // reopens with no successful op -> disable for the session
 #define GAME_LBA_MAX    360000    // game address space mapped across the prop stroke
+#define SPEED_MIN       2         // light/idle target speed (x) - the audible floor
+#define SPEED_MAX       12        // heavy-load target speed (x) - the audible ceiling
+#define SPEED_STEP      2         // only step the speed in units this big
+#define SPEED_DEBOUNCE_MS 300     // min gap between speed changes so the motor is not flapped
 #define SEEK_TIMEOUT_MS 4000
 #define READ_TIMEOUT_MS 4000
 
@@ -168,6 +172,15 @@ static void sg_start_stop(int fd, int start)
 	ioctl(fd, SG_IO, &io);
 }
 
+// change the drive's target speed (CDROM_SELECT_SPEED, the same ioctl physcd
+// uses for its cap). the motor ramps toward the new speed, which is the spin
+// up/down you actually hear. best effort - a drive that ignores it just holds
+// a steady spin, i.e. the previous behaviour.
+static void set_speed(int fd, int nx)
+{
+	ioctl(fd, CDROM_SELECT_SPEED, nx);
+}
+
 // scale the game lba onto the prop disc's readable window, so every burst
 // lands on burned sectors and different game positions ride different radii
 // (position-dependent pitch on a CLV drive). monotonic - no modulo wrap.
@@ -239,6 +252,8 @@ static void *acoustic_thread(void *arg)
 	int last_pos = -1000000;         // far below any real lba, forces the first op
 	int seek_fails = 0, read_fails = 0, reopen_fails = 0;
 	int idle_stopped = 0;
+	int cur_speed = 0;               // last speed we set (0 = none yet)
+	double last_speed_ms = 0;
 
 	while (ac.running) {
 		// paused (menu owns the drive), disabled, or the drive rejected even
@@ -261,6 +276,7 @@ static void *acoustic_thread(void *arg)
 			    && now - last_active >= DEEP_IDLE_MS) {
 				sg_start_stop(ac.fd, 0);
 				idle_stopped = 1;
+				cur_speed = 0;   // next active period re-ramps from the floor
 			}
 			struct timespec ts = { 0, 80 * 1000 * 1000 };
 			nanosleep(&ts, NULL);
@@ -289,6 +305,7 @@ static void *acoustic_thread(void *arg)
 				continue;
 			}
 			last_pos = -1000000;   // force the first op on a fresh disc
+			cur_speed = 0;         // re-ramp speed on a fresh disc
 		}
 
 		// intensity sampler: seq bumps once per hinted sector, so its rate is
@@ -309,6 +326,20 @@ static void *acoustic_thread(void *arg)
 		double gap = 120.0 - rate;
 		if (gap < 10.0) gap = 10.0;
 		if (gap > 120.0) gap = 120.0;
+
+		// spin the motor UP under load and DOWN when light by ramping the
+		// drive's target speed with intensity. stepped + debounced so it is an
+		// audible ramp, not a flutter. (1x CD = 75 sectors/s, so heavy load
+		// pushes rate well past SPEED_MAX*12.)
+		int want = SPEED_MIN + (int)(rate / 12);
+		if (want > SPEED_MAX) want = SPEED_MAX;
+		want = (want / SPEED_STEP) * SPEED_STEP;
+		if (want < SPEED_MIN) want = SPEED_MIN;
+		if (want != cur_speed && now - last_speed_ms >= SPEED_DEBOUNCE_MS) {
+			set_speed(ac.fd, want);
+			cur_speed = want;
+			last_speed_ms = now;
+		}
 
 		int lba = map_lba(ac.target_lba);
 		int jump = lba > last_pos ? lba - last_pos : last_pos - lba;

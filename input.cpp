@@ -6283,6 +6283,14 @@ int input_test(int getchar)
 						// cannot drift apart as cores are added
 						physcd_mount_current_core();
 					}
+					else if (!strncmp(cmd, "swap_phys", 9) &&
+						(cmd[9] == '\0' || cmd[9] == ' ' || cmd[9] == '\t'))
+					{
+						// swap_phys - after physically swapping the disc in a
+						// multi-disc game, hand the new disc to the running core
+						// with no reset so the game continues. PSX only for now.
+						physcd_swap_current_core();
+					}
 				}
 			}
 

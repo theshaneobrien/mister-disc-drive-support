@@ -36,6 +36,7 @@
 #define SLOT_SIZE (PHYSCD_RAW + PHYSCD_SUB)
 #define READAHEAD 96                  /* sectors ahead, per window      */
 #define BURST 16                      /* sectors per drive transaction  */
+#define PREWARM_SECTORS 768           /* cold-start spin-up read (~10s)  */
 #define STATS_MS 5000
 
 /*
@@ -155,9 +156,16 @@ static struct {
 	int watch_type;
 	char watch_label[64];
 	volatile int watch_dirty;     /* presence changed since last query  */
+	volatile int swap_enable;     /* arm mid-mount physical disc-swap detection */
+	volatile int swap_ready;      /* a swap happened; the new toc is loaded     */
+	volatile int swapping;        /* reload in flight: the read path serves zeros */
+	volatile int last_win;        /* window of the most recent real read; -1 = none yet */
+	volatile int prewarm;         /* cold-start spin-up: next lba to pre-read; -1 = idle */
+	volatile int prewarm_end;     /* stop pre-reading at this lba */
+	volatile int swap_ejected;    /* mid-swap: disc physically out, new toc not loaded yet */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0 };
 
 static int track_of(int lba)
 {
@@ -198,6 +206,33 @@ static void set_speed_cap()
 	else
 		printf("physcd: speed capped at %dx (~%d KB/s, need 172)\n",
 			PHYSCD_SPEED_NX, PHYSCD_SPEED_NX * 177);
+}
+
+/* defang the kernel's block-layer probing of our drive. after a media change,
+   the first plain open of /dev/srN (udev and the partition rescan) reads the
+   START and the END of the device through the page cache - the end because the
+   GPT backup header lives there. on a disc that ends in AUDIO tracks, cooked
+   READ(10) is illegal there ("illegal mode for this track"), and the big
+   readahead bursts those probes generate (60-block, 10+ segment scatterlists)
+   wedge some usb bridges hard: dwc2 scatterlist error, a 30-SECOND block-layer
+   timeout, then a usb reset - observed twice per Policenauts session, which is
+   why an audio-tailed disc "loads slow" while a data-tailed one flies. we
+   cannot stop the probe, but with readahead at zero its reads shrink to single
+   pages that fail in milliseconds instead of wedging the bridge. our own SG_IO
+   reads bypass the page cache entirely, so this costs us nothing. */
+static void quiet_block_probes(const char *dev)
+{
+	const char *name = strrchr(dev, '/');
+	name = name ? name + 1 : dev;
+
+	char path[128];
+	snprintf(path, sizeof(path), "/sys/block/%s/queue/read_ahead_kb", name);
+	FILE *f = fopen(path, "w");
+	if (f) {
+		fputs("0", f);
+		fclose(f);
+		printf("physcd: block readahead off for %s (kernel disc probes fail fast now)\n", name);
+	}
 }
 
 // ---------------------------------------------------------------- reads
@@ -454,6 +489,7 @@ static void try_reattach(void)
 		snprintf(cur_dev, 64, "%s", newdev);
 		pcd.st_reattach++;
 		pcd.consec_fail = 0;
+		quiet_block_probes(cur_dev);   /* a re-enumerated device gets fresh queue defaults */
 		set_speed_cap();
 		printf("physcd: drive re-attached as %s (recovered from a usb reset)\n", newdev);
 	}
@@ -473,6 +509,10 @@ static void *prefetch_thread(void *arg)
 
 	double last_watch = 0;
 	int was_present = -1;
+
+	double last_swap_check = 0;
+	int swap_was_present = -1;
+	int swap_ejected = 0;
 
 	while (pcd.running) {
 		int target = -1;
@@ -564,6 +604,72 @@ static void *prefetch_thread(void *arg)
 			continue;
 		}
 
+		/* mid-mount physical disc swap (multi-disc games), armed by the core
+		   for phys mounts. watch the present edge; on eject then insert,
+		   reload the toc HERE - on this thread, so it serialises against
+		   fill_cache, and pcd.swapping makes the consumer read path serve
+		   zeros while trk[]/leadout are rewritten. then flag the core (via
+		   physcd_swap_consume) to re-announce the disc without a reset. */
+		/* (leadout>0 || swap_ejected): a failed reload leaves leadout at 0, so
+		   keep the block armed while an eject is pending or we would never
+		   retry and the read path would serve zeros forever. */
+		if (pcd.swap_enable && (pcd.leadout > 0 || swap_ejected)
+		    && now_ms() - last_swap_check >= 500) {
+			last_swap_check = now_ms();
+			int present = physcd_disc_present();
+			if (swap_was_present == 1 && !present) {
+				swap_ejected = 1;                 /* disc pulled */
+				pcd.swap_ejected = 1;             /* let the core show the lid open in real time */
+			}
+			else if (swap_ejected && present) {
+				/* new disc in and reading (present only goes true past spin-up,
+				   but a first read can still fail on a marginal disc - keep
+				   swap_ejected so we retry). the reload runs under pcd.io so its
+				   toc ioctls cannot race a consumer fill_cache, and pcd.swapping
+				   bails the read path while trk[]/leadout are rewritten. */
+				toc_t scratch;
+				pcd.swapping = 1;
+				pthread_mutex_lock(&pcd.io);
+				physcd_forget_disc();
+				int ok = !physcd_load_toc(&scratch);
+				pthread_mutex_unlock(&pcd.io);
+				pcd.swapping = 0;
+				if (ok) {
+					/* publish the reloaded trk[]/leadout BEFORE the swap_ready
+					   flag the poll thread gates on, so a weakly-ordered arm
+					   core cannot observe the flag with a stale toc (matches the
+					   prewarm arm; physcd_swap_consume pairs the acquire side) */
+					pcd.swap_ejected = 0;
+					__sync_synchronize();
+					pcd.swap_ready = 1;
+					swap_ejected = 0;
+					printf("physcd: disc swap - new toc loaded\n");
+				}
+				/* load failed (drive not settled): swap_ejected stays set, the
+				   gate above keeps retrying every 500ms until it reads */
+			}
+			swap_was_present = present;
+		}
+
+		/* cold-start spin-up: on a fresh audio-first mount, aggressively read a
+		   deep lead of the first audio track BEFORE the core plays, so the drive
+		   reaches full read speed and the cdda cache is filled - otherwise the
+		   drive's multi-second spin-up starves the first several seconds of
+		   playback. stops the instant the core issues its first read (last_win
+		   set) or once the lead is built, and yields to any waiting consumer. */
+		if (pcd.prewarm >= 0) {
+			if (pcd.last_win >= 0 || pcd.prewarm >= pcd.prewarm_end
+			    || pcd.consec_fail >= 8 || pcd.leadout <= 0) {
+				pcd.prewarm = -1;   /* core read, lead built, drive struggling, or toc swapping */
+			} else if (!pcd.sync_pending) {
+				int pw = pcd.prewarm;
+				fill_cache(pw, BURST, 0);
+				pcd.prewarm = pw + BURST;
+				last_io = now_ms();
+				continue;
+			}
+		}
+
 		/* serve the neediest active window, alternating which one
 		   gets looked at first so neither stream starves */
 		pthread_mutex_lock(&pcd.lock);
@@ -607,19 +713,28 @@ static void *prefetch_thread(void *arg)
 			/* nothing to fetch. if a disc is mounted and the drive has
 			   been untouched for a while, poke it so it does not spin
 			   down / get autosuspended - waking it is what stalls for
-			   minutes. one sector, discarded, near the cursor. */
-			if (pcd.leadout > 0 && now_ms() - last_io >= KEEPALIVE_MS) {
+			   minutes. one sector, discarded, on the stream the core is
+			   ACTUALLY reading (last_win) - never the data track of a
+			   mixed disc an audio player is ignoring. skipped until a
+			   first read tells us which stream is live. */
+			int lw = pcd.last_win;
+			/* before any read (mounted but nothing streamed yet - a paused cd
+			   player, a slow core init, the moment after a swap) fall back to
+			   the primed cursor[0] so the drive STILL gets its poke: a mount
+			   that idles must never spin down into the multi-minute usb wake
+			   stall. once a real read arms last_win the poke follows the actual
+			   stream, so a mixed disc's data track is never chased mid-play. */
+			int klba = (lw >= 0) ? pcd.cursor[lw] : (pcd.leadout > 0 ? pcd.cursor[0] : -1);
+			if (klba >= pcd.leadout) klba = pcd.leadout - 1;  /* sat on leadout: poke the last real sector */
+			if (pcd.leadout > 0 && klba >= 0
+			    && now_ms() - last_io >= KEEPALIVE_MS && !pcd.sync_pending) {
 				uint8_t sc[SLOT_SIZE];
-				int lba = pcd.cursor[0];
-				if (lba < 0 || lba >= pcd.leadout) lba = pcd.first_data_lba;
-				if (lba >= 0 && lba < pcd.leadout && !pcd.sync_pending) {
-					int t = track_of(lba);
-					uint8_t fl = (t >= 0 && pcd.trk[t].audio) ? 0x10 : 0xF8;
-					pthread_mutex_lock(&pcd.io);
-					sg_read_cd(lba, 1, fl, 0, sc, BG_TIMEOUT_MS);
-					pthread_mutex_unlock(&pcd.io);
-					last_io = now_ms();
-				}
+				int t = track_of(klba);
+				uint8_t fl = (t >= 0 && pcd.trk[t].audio) ? 0x10 : 0xF8;
+				pthread_mutex_lock(&pcd.io);
+				sg_read_cd(klba, 1, fl, 0, sc, BG_TIMEOUT_MS);
+				pthread_mutex_unlock(&pcd.io);
+				last_io = now_ms();
 			}
 
 			/* both windows full (or no toc yet): check again soon */
@@ -697,12 +812,15 @@ int physcd_open(const char *dev)
 	if (!pcd.cache) { close(pcd.fd); pcd.fd = -1; return -1; }
 	for (int i = 0; i < CACHE_SECTORS; i++) pcd.cache[i].lba = -1;
 
+	quiet_block_probes(cur_dev);
 	set_speed_cap();
 
 	pcd.leadout = 0;
 	pcd.ntrk = 0;
 	pcd.sub_ok = -1;
 	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; }
+	pcd.last_win = -1;
+	pcd.prewarm = -1;
 	pcd.st_hit = pcd.st_miss = 0;
 	pcd.st_worst_ms = 0.0;
 	pcd.running = 1;
@@ -738,6 +856,37 @@ int physcd_media_changed()
 int physcd_drive_busy()
 {
 	return pcd.fd >= 0;
+}
+
+// arm/disarm mid-mount disc-swap detection. the core calls this on a physical
+// mount so the prefetch thread watches for an eject-then-insert.
+int physcd_swap_ejected(void)
+{
+	/* mid-swap window: the disc is physically out (or back in but its toc not
+	   loaded yet). cores use this to show the guest a REAL-TIME lid-open - the
+	   lid lifts when the user ejects, not a compressed pulse after the fact. */
+	return pcd.swap_enable && pcd.swap_ejected;
+}
+
+void physcd_swap_enable(int enable)
+{
+	pcd.swap_enable = enable ? 1 : 0;
+	if (!enable) pcd.swap_ejected = 0;
+	if (!enable) pcd.swap_ready = 0;
+}
+
+// 1 once after a physical disc swap has been detected and the new toc loaded,
+// so the core can re-announce the disc. O(1) read-and-clear, safe from the
+// core poll thread.
+int physcd_swap_consume(void)
+{
+	int r = pcd.swap_ready;
+	pcd.swap_ready = 0;
+	/* acquire: pair the prefetch thread's release fence so a caller that sees
+	   the flag also sees the reloaded trk[]/leadout before it reads them via
+	   physcd_current_toc (all swap consumers - psx + the cdd cores) */
+	if (r) __sync_synchronize();
+	return r;
 }
 
 // probe raw P-W subchannel support once per disc: only conclude "no"
@@ -827,16 +976,46 @@ int physcd_load_toc(toc_t *toc)
 	pcd.sub_ok = -1;
 	probe_subchannel(toc->tracks[0].start + 16);
 
-	/* prime the data window at track 1; the cdda window activates on
-	   its first read so we don't spin the head over audio nobody
-	   asked for yet */
+	/* prime cursor[0] at track 1 but DO NOT arm the data window: a window
+	   activates only when the core actually reads from it (read_sector_impl).
+	   an audio-cd player reads only audio, so on a mixed-mode (cd-extra) disc
+	   the head is never pulled to the data track it will never ask for. a game
+	   activates window 0 on its first boot read, at the cursor already primed
+	   here. */
 	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; }
 	pcd.cursor[0] = toc->tracks[0].start;
-	pcd.wactive[0] = 1;
+	pcd.last_win = -1;
 	pcd.st_hit = pcd.st_miss = pcd.st_bad = pcd.st_bad_logged = 0;
 	pcd.st_worst_ms = pcd.st_worst_io_ms = 0.0;
 
 	pcd.leadout = lead.cdte_addr.lba;         /* unblocks prefetch    */
+
+	/* cold-start spin-up pre-warm, audio-first discs only (a pure audio cd or
+	   a cd-extra album, whose track 1 is audio). such a disc plays as audio
+	   the moment the core's cd player opens, but a cold drive's spin-up takes
+	   SECONDS - the cdda prefetch cannot out-read a not-yet-at-speed drive, so
+	   the first ~6s stutter ("durr durr") until it ramps. arm the cdda window
+	   and queue a deep read of the first audio track so the prefetch thread
+	   spins the drive up AND fills the cache before playback. the psx read path
+	   subtracts the 150 pregap, so tracks[0].start is the exact lba the core
+	   will ask for. games (data-first) skip this and stay lazy; a slow
+	   multisession data track is never pre-warmed. */
+	pcd.prewarm = -1;
+	if (pcd.ntrk && pcd.trk[0].audio) {
+		int pw_end = toc->tracks[0].start + PREWARM_SECTORS;
+		if (pw_end > pcd.trk[0].end) pw_end = pcd.trk[0].end;  /* stay inside track 1 */
+		if (pw_end > pcd.leadout)    pw_end = pcd.leadout;
+		/* publish the payload (window + bound) BEFORE the arm flag, mirroring
+		   how leadout is written last to unblock the prefetch: the prefetch
+		   thread gates on pcd.prewarm, so a store fence keeps it from seeing
+		   the flag armed while prewarm_end is still stale (which would abort
+		   the pre-warm and silently give back the cold-start stutter). */
+		pcd.cursor[1] = toc->tracks[0].start;
+		pcd.wactive[1] = 1;
+		pcd.prewarm_end = pw_end;
+		__sync_synchronize();
+		pcd.prewarm = toc->tracks[0].start;
+	}
 
 	printf("\x1b[32mphyscd: toc loaded, %d tracks, leadout %d, subchannel %s\n\x1b[0m",
 		n, pcd.leadout,
@@ -851,7 +1030,8 @@ int physcd_load_toc(toc_t *toc)
    -1 if nothing is mounted. */
 int physcd_current_toc(toc_t *toc)
 {
-	if (!toc || pcd.fd < 0 || pcd.ntrk < 1 || pcd.leadout <= 0) return -1;
+	// pcd.swapping: a reload is rewriting trk[]/leadout, do not copy mid-flight
+	if (!toc || pcd.fd < 0 || pcd.swapping || pcd.ntrk < 1 || pcd.leadout <= 0) return -1;
 
 	memset(toc, 0, sizeof(toc_t));
 	for (int i = 0; i < pcd.ntrk; i++) {
@@ -888,9 +1068,11 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 {
 	if (sub_valid) *sub_valid = 0;
 
-	if (pcd.fd < 0 || lba < 0 || lba >= pcd.leadout) {
-		/* always leave dst defined: megacd's ReadCDDA ignores the
-		   return value and would otherwise ship an uninitialized
+	if (pcd.fd < 0 || pcd.swapping || lba < 0 || lba >= pcd.leadout) {
+		/* pcd.swapping: a disc swap is reloading the toc on the prefetch
+		   thread, so bail here before touching pcd.trk[]/leadout while they
+		   are being rewritten. always leave dst defined: megacd's ReadCDDA
+		   ignores the return value and would otherwise ship an uninitialized
 		   stack buffer to the fpga */
 		memset(dst, 0, PHYSCD_RAW);
 		if (sub96) memset(sub96, 0, PHYSCD_SUB);
@@ -899,6 +1081,7 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 
 	int w = win_of(lba);
 	pcd.wactive[w] = 1;
+	pcd.last_win = w;        /* the stream the core is actually reading */
 
 	pthread_mutex_lock(&pcd.lock);
 	slot_t *s = slot_for(lba);

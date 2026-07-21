@@ -54,6 +54,8 @@ public:
 
 	cdd_t();
 	int Load(const char *filename);
+	int SwapPhys();                       // adopt a physically-swapped disc's toc, no drive read
+	int is_phys() { return toc.phys; }
 	void Unload();
 	void Reset();
 	void Update();

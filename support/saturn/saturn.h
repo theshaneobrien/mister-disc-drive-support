@@ -58,6 +58,10 @@ public:
 	uint8_t* GetStatus();
 	int SetCommand(uint8_t* data);
 	int GetBootHeader(uint8_t *buf);
+	int SwapPhys();                       // adopt a physically-swapped disc's toc, no drive read
+	void SwapOpen();                      // real-time lid: the user physically ejected
+	void SwapClose();                     // end the swap's lid-open dwell (guest then sees STOP + new toc)
+	int is_phys() { return toc.phys; }
 
 	bool wwf_hack;
 	bool roadrash_hack;

@@ -11,6 +11,7 @@
 #include "../../menu.h"
 #include "../../cheats.h"
 #include "../megacd/megacd.h"
+#include "../physcd/mister_physcd.h"
 #include "neogeocd.h"
 #include "neogeo_loader.h"
 
@@ -28,6 +29,24 @@ static uint8_t cd_speed = 0;
 void neocd_poll()
 {
 	static uint8_t last_req = 255;
+	static uint32_t swap_close_at = 0;
+
+	/* a physically-swapped audio cd: adopt its toc (cached, no drive read) and
+	   pulse the tray OPEN->STOP so the bios cd player re-scans it. neogeo cd
+	   games are single-disc, so this is the album-swap path only. */
+	if (cdd.is_phys() && physcd_swap_consume() && cdd.SwapPhys())
+	{
+		cdd.isData = 1;
+		cdd.status = CD_STAT_OPEN;
+		cdd.latency = 0;
+		swap_close_at = GetTimer(PHYSCD_SWAP_DWELL_MS);
+	}
+	if (cdd.is_phys() && swap_close_at && CheckTimer(swap_close_at))   // is_phys: never touch a later image mount
+	{
+		swap_close_at = 0;
+		cdd.status = cdd.loaded ? CD_STAT_STOP : CD_STAT_NO_DISC;
+		cdd.latency = 10;
+	}
 
 	if (!poll_timer || CheckTimer(poll_timer))
 	{
@@ -113,8 +132,10 @@ void set_poll_timer()
 int neocd_set_image(const char *filename)
 {
 	int bios_ok = 0;
+	int phys = !strcmp(filename, PHYSCD_SENTINEL);
 
 	cdd.Unload();
+	physcd_swap_enable(0);              // any remount/unmount disarms swap detection
 	cdd.status = CD_STAT_OPEN;
 
 	if (*filename)
@@ -131,6 +152,7 @@ int neocd_set_image(const char *filename)
 			cdd.latency = 10;
 			cdd.SendData = neocd_send_data;
 			cdd.CanSendData = neocd_can_send_data;
+			if (phys) physcd_swap_enable(1);   // arm mid-mount physical disc-swap detection
 		}
 		else
 		{

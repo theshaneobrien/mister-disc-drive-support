@@ -41,10 +41,63 @@ static uint32_t CalcTimerOffset(uint8_t speed) {
 	return offs;
 }
 
+/* per-game quirk flags derived from the ip.bin product id. one helper for the
+   mount path AND the physical swap path so the two can never drift. */
+static void saturn_apply_disc_hacks(const char *id)
+{
+	satcdd.wwf_hack =
+		!strncmp(id, "T-8126H", 7) ||
+		!strncmp(id, "T-8120G", 7) ||
+		!strncmp(id, "T-8112H", 7) ||
+		!strncmp(id, "T-99901G", 8) ||
+		!strncmp(id, "T-8112G", 7);
+	satcdd.roadrash_hack =
+		!strncmp(id, "T-5008H", 7) ||
+		!strncmp(id, "T-10609G", 8);
+#ifdef SATURN_DEBUG
+	if (satcdd.wwf_hack) printf("\x1b[32mSaturn: WWF games hack!!!\n\x1b[0m");
+	if (satcdd.roadrash_hack) printf("\x1b[32mSaturn: Road Rash games hack!!!\n\x1b[0m");
+#endif // SATURN_DEBUG
+}
+
 void saturn_poll()
 {
 	static unsigned long poll_timer = 0;
 	static uint8_t last_req = 255;
+
+	/* physical disc swap, in REAL TIME like a real Saturn: the lid opens the
+	   moment the user ejects (the game's disc-change flow starts while they
+	   are still holding the disc), stays open through the swap, and closes
+	   only after the new disc's toc is loaded and its boot header pushed -
+	   the guest then sees STOP with the new toc off a properly-ordered lid
+	   cycle. (a compressed after-the-fact pulse sent the bios check to the
+	   player menu; a silent STOP was ignored outright - both hardware-tested.) */
+	static uint32_t swap_close_at = 0;
+	if (satcdd.is_phys())
+	{
+		if (physcd_swap_ejected()) satcdd.SwapOpen();
+		if (physcd_swap_consume() && satcdd.SwapPhys())
+		{
+			/* every mount - including the proven no-reset OSD swap - pushes
+			   the disc's ip.bin boot header (BOOT_IO_INDEX); the bios disc
+			   validation consults it, and a stale header reads as "wrong
+			   disc" (hardware-observed). pushed while the lid is still open,
+			   so it is in place before the guest sees the new toc. also
+			   re-derive the per-game quirk flags like every OSD mount does. */
+			static uint8_t hdr[256];
+			if (satcdd.GetBootHeader(hdr) > 0)
+			{
+				saturn_send_data(hdr, 256, BOOT_IO_INDEX);
+				saturn_apply_disc_hacks((const char*)hdr + 0x20);
+			}
+			swap_close_at = GetTimer(PHYSCD_SWAP_DWELL_MS);
+		}
+		if (swap_close_at && CheckTimer(swap_close_at))
+		{
+			swap_close_at = 0;
+			satcdd.SwapClose();
+		}
+	}
 
 	if (!poll_timer || CheckTimer(poll_timer))
 	{
@@ -166,6 +219,7 @@ int saturn_set_image(int num, const char *filename)
 
 	satcdd.Unload();
 	satcdd.Reset();
+	physcd_swap_enable(0);              // any remount/unmount disarms swap detection
 
 	int same_game = *filename && *last_dir && !strncmp(last_dir, filename, strlen(last_dir));
 	/* the phys sentinel is one fixed string, so a remount always looks
@@ -214,6 +268,7 @@ int saturn_set_image(int num, const char *filename)
 		{
 			mounted = 1;
 			satcdd.SendData = saturn_send_data;
+			if (phys) physcd_swap_enable(1);   // arm mid-mount physical disc-swap detection
 
 			if (!same_game && reset_after_insert_disc)
 			{
@@ -226,26 +281,7 @@ int saturn_set_image(int num, const char *filename)
 			if (satcdd.GetBootHeader((uint8_t*)buf) > 0)
 			{
 				saturn_send_data((uint8_t*)buf, 256, BOOT_IO_INDEX);
-
-				char *id = buf + 0x20;
-				if (!strncmp(id,"T-8126H",7) ||
-					!strncmp(id, "T-8120G", 7) ||
-					!strncmp(id, "T-8112H", 7) ||
-					!strncmp(id, "T-99901G", 8) ||
-					!strncmp(id, "T-8112G", 7)) satcdd.wwf_hack = true;
-				if (satcdd.wwf_hack) {
-#ifdef SATURN_DEBUG
-					printf("\x1b[32mSaturn: WWF games hack!!!\n\x1b[0m");
-#endif // SATURN_DEBUG
-				}
-
-				if (!strncmp(id, "T-5008H", 7) ||
-					!strncmp(id, "T-10609G", 8)) satcdd.roadrash_hack = true;
-				if (satcdd.roadrash_hack) {
-#ifdef SATURN_DEBUG
-					printf("\x1b[32mSaturn: Road Rash games hack!!!\n\x1b[0m");
-#endif // SATURN_DEBUG
-				}
+				saturn_apply_disc_hacks(buf + 0x20);
 			}
 		}
 	}

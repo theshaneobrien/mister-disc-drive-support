@@ -342,6 +342,30 @@ static void unload_phys(toc_t *table)
 	memset(table, 0, sizeof(toc_t));
 }
 
+/* physcd reports drive-absolute lbas with EXCLUSIVE ends (what megacd
+ * wants). psx wants inclusive ends and the same faked 150-sector pregap
+ * load_chd applies, so that core lba 150 is the first sector of track 1.
+ * shifting every track by the same 150 keeps one uniform bias, so
+ * psx_read_cd subtracts 150 and hands the drive its own addressing back.
+ *
+ * indexes[1] stays 0 on tracks after the first: the drive reports each
+ * start as its INDEX 1 position, so no further correction is wanted.
+ * pregap stays 0 too - a real disc has those sectors and can just read
+ * them. shared by the initial mount and a disc swap. */
+static void apply_phys_bias(toc_t *table)
+{
+	for (int i = 0; i < table->last; i++)
+	{
+		int len = table->tracks[i].end - table->tracks[i].start;
+
+		table->tracks[i].indexes[1] = i ? 0 : 150;
+		table->tracks[i].pregap = 0;
+		table->tracks[i].start += 150;
+		table->tracks[i].end = table->tracks[i].start + len - 1;
+	}
+	table->end = table->tracks[table->last - 1].end + 1;
+}
+
 static int load_phys(toc_t *table)
 {
 	/* release whatever was mounted before */
@@ -358,29 +382,7 @@ static int load_phys(toc_t *table)
 		return 0;
 	}
 
-	/* physcd reports drive-absolute lbas with EXCLUSIVE ends (what
-	 * megacd wants). psx wants inclusive ends and the same faked
-	 * 150-sector pregap load_chd applies, so that core lba 150 is the
-	 * first sector of track 1. shifting every track by the same 150
-	 * keeps one uniform bias, so psx_read_cd subtracts 150 and hands
-	 * the drive its own addressing back.
-	 *
-	 * indexes[1] stays 0 on tracks after the first: the drive reports
-	 * each start as its INDEX 1 position, so no further correction is
-	 * wanted. pregap stays 0 too - unlike a cue whose file omits the
-	 * gap, a real disc has those sectors and can just read them.
-	 */
-	for (int i = 0; i < table->last; i++)
-	{
-		int len = table->tracks[i].end - table->tracks[i].start;
-
-		table->tracks[i].indexes[1] = i ? 0 : 150;
-		table->tracks[i].pregap = 0;
-		table->tracks[i].start += 150;
-		table->tracks[i].end = table->tracks[i].start + len - 1;
-	}
-	table->end = table->tracks[table->last - 1].end + 1;
-
+	apply_phys_bias(table);
 	return 1;
 }
 
@@ -515,6 +517,12 @@ void psx_fill_blanksave(uint8_t *buffer, uint32_t lba, int cnt)
 }
 
 static toc_t toc = {};
+
+// the f_index/s_index the physical disc was mounted with, so a swap can
+// re-register the new disc on the same channels, plus the region (a multi-disc
+// game keeps the same region across discs, so no disc read needed on a swap)
+static int s_swap_fidx = 1, s_swap_sidx = 1;
+static region_t s_swap_region = UNKNOWN;
 #define CD_SECTOR_LEN 2352
 
 int psx_chd_hunksize()
@@ -757,6 +765,8 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 
 	int loaded = 0;
 	int phys = !strcmp(filename, PHYSCD_SENTINEL);
+	physcd_swap_enable(0);   // normalize swap detection on entry, like the cdd cores
+	if (phys) { s_swap_fidx = f_index; s_swap_sidx = s_index; }
 
 	if (strlen(filename))
 	{
@@ -769,6 +779,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 			if (region == region_t::UNKNOWN)
 				region = game_info.region;
 			printf("Game ID: %s, region: %s\n", game_id, region_string(region));
+			if (phys) s_swap_region = region;   // reused by a later disc swap
 
 			/* region and game id come from the disc itself, so they
 			   work on a physical mount with no extra plumbing. the
@@ -883,12 +894,16 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 
 			mount_cd(toc.end*CD_SECTOR_LEN, s_index);
 			loaded = 1;
+
+			// arm mid-game physical disc-swap detection (multi-disc games)
+			if (phys) physcd_swap_enable(1);
 		}
 	}
 
 	if (!loaded)
 	{
 		printf("Unmount CD\n");
+		physcd_swap_enable(0);
 		if (toc.phys) unload_phys(&toc);
 		unload_cue(&toc);
 		unload_chd(&toc);
@@ -899,8 +914,56 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 	return loaded;
 }
 
+// announce the disc physcd currently has loaded to the running core as a SWAP
+// (reset bit clear, memory card untouched), so a multi-disc game keeps going.
+// the new disc's toc must already be loaded in physcd - the auto path reloads
+// on the prefetch thread, the manual path reloads first. no drive read here,
+// so this is safe to call from psx_poll.
+static void psx_swap_apply()
+{
+	toc_t nt = {};
+	if (physcd_current_toc(&nt) || !nt.last) return;
+	apply_phys_bias(&nt);
+	toc = nt;   // adopt; psx_poll and psx_read_cd run on this same thread, no lock
+
+	// reuse the mount region: a multi-disc game is the same region across
+	// discs, and this keeps the poll thread from doing a disc read here.
+	region_t region = s_swap_region;
+
+	// SWAP: reset bit CLEAR, and DO NOT touch the memory card or gameid - the
+	// save follows the game across discs. libcrypt mask 0 is fine for the
+	// multi-disc rpgs this is for (FF etc).
+	printf("PSX: disc swap -> region %s\n", region_string(region));
+	send_cue_and_metadata(&toc, 0, region, 0);
+	user_io_set_index(s_swap_fidx);
+	mount_cd(toc.end * CD_SECTOR_LEN, s_swap_sidx);
+}
+
+// manual trigger (swap_phys fifo): re-read the disc now in the drive, then
+// announce it. blocking, but it is a deliberate user action. stage-B auto
+// detection makes this unnecessary, but it stays as a fallback.
+void psx_swap_disc()
+{
+	if (!toc.phys)
+	{
+		printf("PSX: swap_phys ignored - the running game is not on a physical disc\n");
+		return;
+	}
+	toc_t scratch = {};
+	if (physcd_load_toc(&scratch) || !scratch.last)
+	{
+		printf("PSX: swap_phys - new disc not ready, wait a moment and retry\n");
+		return;
+	}
+	psx_swap_apply();
+}
+
 void psx_poll()
 {
+	// stage B: the prefetch thread flags a physical disc swap once the new
+	// disc's toc is loaded; announce it to the core.
+	if (toc.phys && physcd_swap_consume()) psx_swap_apply();
+
 	spi_uio_cmd(UIO_CD_GET);
 }
 

@@ -24,6 +24,13 @@
 #include "mister_physcd.h"
 #include "physcd_autoboot.h"
 
+#ifdef HAS_RCHEEVOS
+// v2 (RA build): identify a physical disc for RetroAchievements and prefer
+// the RA-patched core. all of this compiles out on the plain disc build.
+#include "../../achievements.h"
+extern const char *getRootDir();
+#endif
+
 /* both survive the exec, which is the whole point - see the header */
 #define MARKER "/tmp/physcd_autoboot"   /* phase A -> phase B, one-shot   */
 #define BOOTED "/tmp/physcd_booted"     /* what we last booted from disc  */
@@ -77,29 +84,59 @@ static int mountable(physcd_disc_t t)
 		|| t == PHYSCD_DISC_3DO;
 }
 
+/* resolve the rbf for a core. on the RA build, PREFER the RA-patched core
+   from _RA_Cores/Cores/<Core>.rbf: a stock core publishes no ram mirror,
+   so achievements would stay silent. the _RA_Cores basenames match
+   core_name_for() (MegaCD, PSX, Saturn, NeoGeo, TurboGrafx16). falls back
+   to the normal newest-rbf scan. on the plain disc build this is just
+   find_core_rbf. an absolute path (getRootDir is absolute) loads verbatim. */
+static int physcd_find_core_rbf(const char *core, char *out, int outsz)
+{
+#ifdef HAS_RCHEEVOS
+	char ra[1024];
+	snprintf(ra, sizeof(ra), "%s/_RA_Cores/Cores/%s.rbf", getRootDir(), core);
+	if (FileExists(ra)) { snprintf(out, outsz, "%s", ra); return 1; }
+#endif
+	return find_core_rbf(core, out, outsz);
+}
+
 int physcd_mount_current_core(void)
 {
 	// returns whether a disc really mounted, not merely whether the
 	// core was recognised - autoboot reports success from this
-	if (is_megacd()) return mcd_set_image(0, PHYSCD_SENTINEL);
+	int recognised = 1;
+	int mounted = 0;
 
+	if (is_megacd()) mounted = mcd_set_image(0, PHYSCD_SENTINEL);
 	// f_index/s_index as the menu uses for the cd slot
-	if (is_psx()) return psx_mount_cd(1, 1, PHYSCD_SENTINEL);
-
-	if (is_saturn()) return saturn_set_image(0, PHYSCD_SENTINEL);
-
+	else if (is_psx()) mounted = psx_mount_cd(1, 1, PHYSCD_SENTINEL);
+	else if (is_saturn()) mounted = saturn_set_image(0, PHYSCD_SENTINEL);
 	// NeoGeo core does both cart and CD: switch it to CD mode, then the
 	// game streams off the disc via the shared (megacd) cdd
-	if (is_neogeo())
+	else if (is_neogeo())
 	{
 		neocd_set_en(1);
-		return neocd_set_image(PHYSCD_SENTINEL);
+		mounted = neocd_set_image(PHYSCD_SENTINEL);
+	}
+	else if (is_3do()) mounted = p3do_set_image(0, PHYSCD_SENTINEL);
+	else recognised = 0;
+
+	if (!recognised)
+	{
+		printf("physcd: core '%s' has no physical disc support yet\n", user_io_get_core_name());
+		return 0;
 	}
 
-	if (is_3do()) return p3do_set_image(0, PHYSCD_SENTINEL);
+#ifdef HAS_RCHEEVOS
+	// v2: identify the just-mounted physical disc for RetroAchievements. the
+	// hasher reads through our cdreader (ra_cdreader_chd.cpp) since there is
+	// no image file. harmless if RA is off or the core is stock -
+	// achievements_load_game no-ops without an active handler. 3DO has no RA
+	// core, so it simply finds no handler.
+	if (mounted > 0) achievements_load_game(PHYSCD_SENTINEL, 0);
+#endif
 
-	printf("physcd: core '%s' has no physical disc support yet\n", user_io_get_core_name());
-	return 0;
+	return mounted;
 }
 
 // ------------------------------------------------------ phase B: new core
@@ -248,7 +285,7 @@ int physcd_menu_row(char *out, int outsz)
 	{
 		const char *core = core_name_for(t);
 		char rbf[1024];
-		if (core && find_core_rbf(core, rbf, sizeof(rbf)))
+		if (core && physcd_find_core_rbf(core, rbf, sizeof(rbf)))
 		{
 			/* a real title only if there is a non-blank one that is not
 			   just the console name - a whitespace-only label must not
@@ -280,7 +317,7 @@ int physcd_autoboot_load_disc(void)
 
 	const char *core = core_name_for(t);
 	char rbf[1024];
-	if (!core || !find_core_rbf(core, rbf, sizeof(rbf)))
+	if (!core || !physcd_find_core_rbf(core, rbf, sizeof(rbf)))
 	{
 		printf("physcd: no rbf for %s disc\n", physcd_disc_name(t));
 		return 0;
@@ -408,7 +445,7 @@ int physcd_autoboot_menu_tick(void)
 			return 1;
 		}
 
-		if (!find_core_rbf(core, ab_rbf, sizeof(ab_rbf)))
+		if (!physcd_find_core_rbf(core, ab_rbf, sizeof(ab_rbf)))
 		{
 			ab_state = AB_FAILED;
 			ab_latched = 1;

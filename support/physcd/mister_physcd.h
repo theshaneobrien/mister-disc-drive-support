@@ -51,6 +51,11 @@ int physcd_media_changed();
 // 0 on success.
 int physcd_load_toc(toc_t *toc);
 
+// fill a toc_t from the ALREADY-mounted disc without touching the drive or
+// cache (unlike physcd_load_toc). for mid-session callers such as the RA
+// hash reader. 0 on success, -1 if nothing is mounted.
+int physcd_current_toc(toc_t *toc);
+
 // read one full raw sector (2352 bytes) into dst, served from cache
 // when possible. if sub96 is non-null also return the raw P-W
 // subchannel for that sector. blocking, with internal retry.

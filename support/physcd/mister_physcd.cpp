@@ -835,6 +835,34 @@ int physcd_load_toc(toc_t *toc)
 	return 0;
 }
 
+/* fill a toc_t from the CURRENTLY mounted disc without touching the drive
+   or the cache - unlike physcd_load_toc, which re-reads the toc, resets
+   the cache and re-probes subchannel. for callers that need the toc
+   mid-session (the RA hash reader), safe to call while a disc is playing.
+   -1 if nothing is mounted. */
+int physcd_current_toc(toc_t *toc)
+{
+	if (!toc || pcd.fd < 0 || pcd.ntrk < 1 || pcd.leadout <= 0) return -1;
+
+	memset(toc, 0, sizeof(toc_t));
+	for (int i = 0; i < pcd.ntrk; i++) {
+		cd_track_t *trk = &toc->tracks[i];
+		trk->start = pcd.trk[i].start;
+		trk->end = pcd.trk[i].end;
+		trk->type = pcd.trk[i].audio ? TT_CDDA : TT_MODE1;
+		trk->sector_size = PHYSCD_RAW;   /* we always read raw */
+		trk->offset = 0;
+		trk->index_num = 2;
+		trk->indexes[0] = 0;
+		trk->indexes[1] = 0;
+	}
+	toc->last = pcd.ntrk;
+	toc->end = pcd.leadout;
+	toc->sectorSize = PHYSCD_RAW;
+	toc->phys = 1;
+	return 0;
+}
+
 void physcd_seek_hint(int lba)
 {
 	if (lba < 0 || !pcd.ntrk) return;

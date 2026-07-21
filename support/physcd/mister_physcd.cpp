@@ -1000,9 +1000,16 @@ int physcd_load_toc(toc_t *toc)
 	   spins the drive up AND fills the cache before playback. the psx read path
 	   subtracts the 150 pregap, so tracks[0].start is the exact lba the core
 	   will ask for. games (data-first) skip this and stay lazy; a slow
-	   multisession data track is never pre-warmed. */
+	   multisession data track is never pre-warmed.
+	   NOT on a mid-game swap (pcd.swapping): physcd_load_toc is shared between a
+	   fresh mount and the swap reload, and a running game reads the new disc
+	   the instant it is announced - a pre-warm firing then seizes the drive and
+	   pcd.io during exactly that read and starves it (Vib Ribbon swapping in a
+	   music cd bounced to its menu / never registered a usable disc). the
+	   pre-warm is only for a fresh audio-player boot, where the drive warms
+	   during the bios boot before anything reads. */
 	pcd.prewarm = -1;
-	if (pcd.ntrk && pcd.trk[0].audio) {
+	if (!pcd.swapping && pcd.ntrk && pcd.trk[0].audio) {
 		int pw_end = toc->tracks[0].start + PREWARM_SECTORS;
 		if (pw_end > pcd.trk[0].end) pw_end = pcd.trk[0].end;  /* stay inside track 1 */
 		if (pw_end > pcd.leadout)    pw_end = pcd.leadout;

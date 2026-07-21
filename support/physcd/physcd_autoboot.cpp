@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include "../../user_io.h"
@@ -46,6 +47,23 @@ static physcd_disc_t pending_type = PHYSCD_DISC_NONE;
  * not be the uppercase string the is_*() helpers compare against:
  * "MEGACD" finds nothing, "MegaCD" finds MegaCD_20240101.rbf.
  */
+/* which console's bios cd player an audio cd boots into. PHYSCD_AUDIO_CORE
+   (default PSX) lets people pick - PSX is the verified one (its bios cd
+   player is confirmed working); the others are plumbed but their bios cd
+   player is a hardware-verify. only mountable cd consoles are offered; an
+   unknown value falls back to PSX. */
+static physcd_disc_t physcd_audio_console(void)
+{
+	const char *c = cfg.physcd_audio_core;
+	if (!c || !*c)                       return PHYSCD_DISC_PSX;
+	if (!strcasecmp(c, "MegaCD"))        return PHYSCD_DISC_MEGACD;
+	if (!strcasecmp(c, "Saturn"))        return PHYSCD_DISC_SATURN;
+	if (!strcasecmp(c, "NeoGeo") ||
+	    !strcasecmp(c, "NeoGeoCD"))      return PHYSCD_DISC_NEOGEO;
+	if (!strcasecmp(c, "3DO"))           return PHYSCD_DISC_3DO;
+	return PHYSCD_DISC_PSX;
+}
+
 static const char *core_name_for(physcd_disc_t t)
 {
 	switch (t) {
@@ -55,9 +73,9 @@ static const char *core_name_for(physcd_disc_t t)
 	case PHYSCD_DISC_PCECD:  return "TurboGrafx16";
 	case PHYSCD_DISC_NEOGEO: return "NeoGeo";
 	case PHYSCD_DISC_3DO:    return "3DO";
-	// an audio cd boots the PSX core, whose bios has the built-in cd player -
-	// the mister as a ps1 cd player, just like the real thing
-	case PHYSCD_DISC_AUDIO:  return "PSX";
+	// an audio cd boots a console's bios cd player - the mister as a cd
+	// player, just like the real thing. which console is configurable.
+	case PHYSCD_DISC_AUDIO:  return core_name_for(physcd_audio_console());
 	default:                 return NULL;
 	}
 }
@@ -74,7 +92,7 @@ static int core_matches(physcd_disc_t t)
 	// in cart mode; the mount enables cd mode
 	case PHYSCD_DISC_NEOGEO: return is_neogeo();
 	case PHYSCD_DISC_3DO:    return is_3do();
-	case PHYSCD_DISC_AUDIO:  return is_psx();   // audio cd -> PSX cd player
+	case PHYSCD_DISC_AUDIO:  return core_matches(physcd_audio_console());
 	default:                 return 0;
 	}
 }

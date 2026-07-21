@@ -158,9 +158,10 @@ static struct {
 	volatile int swap_enable;     /* arm mid-mount physical disc-swap detection */
 	volatile int swap_ready;      /* a swap happened; the new toc is loaded     */
 	volatile int swapping;        /* reload in flight: the read path serves zeros */
+	volatile int last_win;        /* window of the most recent real read; -1 = none yet */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1 };
 
 static int track_of(int lba)
 {
@@ -654,19 +655,28 @@ static void *prefetch_thread(void *arg)
 			/* nothing to fetch. if a disc is mounted and the drive has
 			   been untouched for a while, poke it so it does not spin
 			   down / get autosuspended - waking it is what stalls for
-			   minutes. one sector, discarded, near the cursor. */
-			if (pcd.leadout > 0 && now_ms() - last_io >= KEEPALIVE_MS) {
+			   minutes. one sector, discarded, on the stream the core is
+			   ACTUALLY reading (last_win) - never the data track of a
+			   mixed disc an audio player is ignoring. skipped until a
+			   first read tells us which stream is live. */
+			int lw = pcd.last_win;
+			/* before any read (mounted but nothing streamed yet - a paused cd
+			   player, a slow core init, the moment after a swap) fall back to
+			   the primed cursor[0] so the drive STILL gets its poke: a mount
+			   that idles must never spin down into the multi-minute usb wake
+			   stall. once a real read arms last_win the poke follows the actual
+			   stream, so a mixed disc's data track is never chased mid-play. */
+			int klba = (lw >= 0) ? pcd.cursor[lw] : (pcd.leadout > 0 ? pcd.cursor[0] : -1);
+			if (klba >= pcd.leadout) klba = pcd.leadout - 1;  /* sat on leadout: poke the last real sector */
+			if (pcd.leadout > 0 && klba >= 0
+			    && now_ms() - last_io >= KEEPALIVE_MS && !pcd.sync_pending) {
 				uint8_t sc[SLOT_SIZE];
-				int lba = pcd.cursor[0];
-				if (lba < 0 || lba >= pcd.leadout) lba = pcd.first_data_lba;
-				if (lba >= 0 && lba < pcd.leadout && !pcd.sync_pending) {
-					int t = track_of(lba);
-					uint8_t fl = (t >= 0 && pcd.trk[t].audio) ? 0x10 : 0xF8;
-					pthread_mutex_lock(&pcd.io);
-					sg_read_cd(lba, 1, fl, 0, sc, BG_TIMEOUT_MS);
-					pthread_mutex_unlock(&pcd.io);
-					last_io = now_ms();
-				}
+				int t = track_of(klba);
+				uint8_t fl = (t >= 0 && pcd.trk[t].audio) ? 0x10 : 0xF8;
+				pthread_mutex_lock(&pcd.io);
+				sg_read_cd(klba, 1, fl, 0, sc, BG_TIMEOUT_MS);
+				pthread_mutex_unlock(&pcd.io);
+				last_io = now_ms();
 			}
 
 			/* both windows full (or no toc yet): check again soon */
@@ -750,6 +760,7 @@ int physcd_open(const char *dev)
 	pcd.ntrk = 0;
 	pcd.sub_ok = -1;
 	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; }
+	pcd.last_win = -1;
 	pcd.st_hit = pcd.st_miss = 0;
 	pcd.st_worst_ms = 0.0;
 	pcd.running = 1;
@@ -892,12 +903,15 @@ int physcd_load_toc(toc_t *toc)
 	pcd.sub_ok = -1;
 	probe_subchannel(toc->tracks[0].start + 16);
 
-	/* prime the data window at track 1; the cdda window activates on
-	   its first read so we don't spin the head over audio nobody
-	   asked for yet */
+	/* prime cursor[0] at track 1 but DO NOT arm the data window: a window
+	   activates only when the core actually reads from it (read_sector_impl).
+	   an audio-cd player reads only audio, so on a mixed-mode (cd-extra) disc
+	   the head is never pulled to the data track it will never ask for. a game
+	   activates window 0 on its first boot read, at the cursor already primed
+	   here. */
 	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; }
 	pcd.cursor[0] = toc->tracks[0].start;
-	pcd.wactive[0] = 1;
+	pcd.last_win = -1;
 	pcd.st_hit = pcd.st_miss = pcd.st_bad = pcd.st_bad_logged = 0;
 	pcd.st_worst_ms = pcd.st_worst_io_ms = 0.0;
 
@@ -967,6 +981,7 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 
 	int w = win_of(lba);
 	pcd.wactive[w] = 1;
+	pcd.last_win = w;        /* the stream the core is actually reading */
 
 	pthread_mutex_lock(&pcd.lock);
 	slot_t *s = slot_for(lba);

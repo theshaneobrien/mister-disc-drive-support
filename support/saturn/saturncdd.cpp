@@ -438,13 +438,23 @@ int satcdd_t::SwapPhys()
 	this->read_toc = false;
 	this->seek_ring = false;
 	this->seek_ring2 = false;
-	/* hardware testing showed a bare STOP-with-new-toc (the OSD image-swap
-	   transition) is NOT enough for a physical swap: the toc was adopted but
-	   the running bios/game kept its stale state. a real Saturn swap always
-	   shows the lid opening, so emit a genuine OPEN dwell - Process's lid_open
-	   branch sends SATURN_STAT_OPEN (checked FIRST, so nothing defers it) -
-	   and saturn_poll closes the lid after PHYSCD_SWAP_DWELL_MS via
-	   SwapClose(); stop_pend then delivers STOP carrying the new toc. */
+	/* the disc-change transition depends on WHAT came in (hardware-tested):
+	   - GAME disc (track 1 = data): the silent OSD-image-swap transition -
+	     STOP with the new toc, NO open edge. a lid-open event obliges the
+	     running game to invoke the bios disc verification, which parks a
+	     different-disc insert at the cd player menu; the proven no-reset OSD
+	     swap never shows the guest an OPEN, and the game's own wait loop
+	     picks up the STOP + new toc (how Panzer Dragoon Saga swaps).
+	   - AUDIO disc: the lid pulse. the bios cd player only re-scans its
+	     track list off a lid event (hardware-confirmed), and a mid-game
+	     audio insert bouncing to the player is what a real Saturn does.
+	   returns 2 = silent game swap, 1 = lid pulse armed (caller must close
+	   via SwapClose after the dwell), 0 = toc not ready. */
+	if (this->toc.tracks[0].type != TT_CDDA) {
+		this->lid_open = false;
+		this->stop_pend = true;
+		return 2;
+	}
 	this->lid_open = true;
 	this->stop_pend = true;
 	return 1;

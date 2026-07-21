@@ -41,27 +41,52 @@ static uint32_t CalcTimerOffset(uint8_t speed) {
 	return offs;
 }
 
+/* per-game quirk flags derived from the ip.bin product id. one helper for the
+   mount path AND the physical swap path so the two can never drift. */
+static void saturn_apply_disc_hacks(const char *id)
+{
+	satcdd.wwf_hack =
+		!strncmp(id, "T-8126H", 7) ||
+		!strncmp(id, "T-8120G", 7) ||
+		!strncmp(id, "T-8112H", 7) ||
+		!strncmp(id, "T-99901G", 8) ||
+		!strncmp(id, "T-8112G", 7);
+	satcdd.roadrash_hack =
+		!strncmp(id, "T-5008H", 7) ||
+		!strncmp(id, "T-10609G", 8);
+#ifdef SATURN_DEBUG
+	if (satcdd.wwf_hack) printf("\x1b[32mSaturn: WWF games hack!!!\n\x1b[0m");
+	if (satcdd.roadrash_hack) printf("\x1b[32mSaturn: Road Rash games hack!!!\n\x1b[0m");
+#endif // SATURN_DEBUG
+}
+
 void saturn_poll()
 {
 	static unsigned long poll_timer = 0;
 	static uint8_t last_req = 255;
 
-	/* a physically-swapped disc: adopt its toc (cached, no drive read), show
-	   the guest a real lid-open dwell, then close - it then gets STOP with the
-	   new toc and re-scans. (a bare STOP was hardware-proven insufficient.) */
+	/* a physically-swapped disc: adopt its toc (cached, no drive read) and
+	   re-announce it. SwapPhys picks the transition by disc type: a GAME disc
+	   gets the silent OSD-style STOP (no open edge - a lid event makes the
+	   game summon the bios disc check, which parks at the cd player), an
+	   AUDIO disc gets the lid pulse the bios player needs to re-scan. */
 	static uint32_t swap_close_at = 0;
-	if (satcdd.is_phys() && physcd_swap_consume() && satcdd.SwapPhys())
+	int sw = (satcdd.is_phys() && physcd_swap_consume()) ? satcdd.SwapPhys() : 0;
+	if (sw)
 	{
 		/* every mount - including the proven no-reset OSD swap - pushes the
 		   disc's ip.bin boot header to the core (BOOT_IO_INDEX); the bios
 		   disc-change validation consults it, and a stale header reads as
-		   "wrong disc" and dumps the guest into the cd player (hardware-
-		   observed on Policenauts). one bounded sector read, during the lid
-		   dwell so the header is in place before the guest sees STOP. */
+		   "wrong disc" (hardware-observed on Policenauts). pushed BEFORE the
+		   guest sees the new toc. also re-derive the per-game quirk flags
+		   like every OSD mount does. one bounded sector read. */
 		static uint8_t hdr[256];
 		if (satcdd.GetBootHeader(hdr) > 0)
+		{
 			saturn_send_data(hdr, 256, BOOT_IO_INDEX);
-		swap_close_at = GetTimer(PHYSCD_SWAP_DWELL_MS);
+			saturn_apply_disc_hacks((const char*)hdr + 0x20);
+		}
+		if (sw == 1) swap_close_at = GetTimer(PHYSCD_SWAP_DWELL_MS);   /* lid pulse: close later */
 	}
 	if (satcdd.is_phys() && swap_close_at && CheckTimer(swap_close_at))
 	{
@@ -251,26 +276,7 @@ int saturn_set_image(int num, const char *filename)
 			if (satcdd.GetBootHeader((uint8_t*)buf) > 0)
 			{
 				saturn_send_data((uint8_t*)buf, 256, BOOT_IO_INDEX);
-
-				char *id = buf + 0x20;
-				if (!strncmp(id,"T-8126H",7) ||
-					!strncmp(id, "T-8120G", 7) ||
-					!strncmp(id, "T-8112H", 7) ||
-					!strncmp(id, "T-99901G", 8) ||
-					!strncmp(id, "T-8112G", 7)) satcdd.wwf_hack = true;
-				if (satcdd.wwf_hack) {
-#ifdef SATURN_DEBUG
-					printf("\x1b[32mSaturn: WWF games hack!!!\n\x1b[0m");
-#endif // SATURN_DEBUG
-				}
-
-				if (!strncmp(id, "T-5008H", 7) ||
-					!strncmp(id, "T-10609G", 8)) satcdd.roadrash_hack = true;
-				if (satcdd.roadrash_hack) {
-#ifdef SATURN_DEBUG
-					printf("\x1b[32mSaturn: Road Rash games hack!!!\n\x1b[0m");
-#endif // SATURN_DEBUG
-				}
+				saturn_apply_disc_hacks(buf + 0x20);
 			}
 		}
 	}

@@ -58,9 +58,10 @@ int physcd_is_menu_row(const char *name);
 // returns 1 if the core type was recognised.
 int physcd_mount_current_core(void);
 
-// swap the physical disc into the running core mid-game (multi-disc games).
-// re-reads the disc now in the drive and hands it over without resetting.
-// PSX only for now; returns 0 on a core with no swap support.
+// manual swap fallback for the swap_phys fifo: re-reads the disc now in the
+// drive and hands it to the running game without resetting (multi-disc games).
+// every swap-capable core auto-detects a physical swap in its poll; only PSX
+// is also wired to this manual command. returns 0 on any other core.
 int physcd_swap_current_core(void);
 
 #endif

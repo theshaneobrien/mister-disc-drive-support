@@ -329,8 +329,8 @@ int cdd_t::Load(const char *filename)
 /* adopt a disc that was physically swapped mid-mount. the physcd backend has
    already re-read the new disc's toc on its prefetch thread and invalidated
    the cache; this pulls that CACHED toc (physcd_current_toc = NO drive read,
-   safe on the poll/fpga thread) and swaps it in. mcd_poll drives the
-   OPEN->STOP tray transition that makes the bios/game re-scan. no Reset (keeps
+   safe on the poll/fpga thread) and swaps it in. mcd_poll / neocd_poll drive
+   the OPEN->STOP tray transition that makes the bios/game re-scan. no Reset (keeps
    SendData), no Unload (would physcd_close the live drive), save untouched. */
 int cdd_t::SwapPhys()
 {
@@ -342,7 +342,7 @@ int cdd_t::SwapPhys()
 	this->loaded = 1;
 	/* clear stale playback position (a longer previous disc could leave an
 	   index/lba past the new toc) - Reset's position half only; status/isData/
-	   latency are driven by mcd_poll's tray pulse. */
+	   latency are driven by the poll's tray pulse (mcd_poll / neocd_poll). */
 	this->index = 0;
 	this->lba = 0;
 	this->scanOffset = 0;

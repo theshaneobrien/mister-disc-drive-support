@@ -207,6 +207,33 @@ static void set_speed_cap()
 			PHYSCD_SPEED_NX, PHYSCD_SPEED_NX * 177);
 }
 
+/* defang the kernel's block-layer probing of our drive. after a media change,
+   the first plain open of /dev/srN (udev and the partition rescan) reads the
+   START and the END of the device through the page cache - the end because the
+   GPT backup header lives there. on a disc that ends in AUDIO tracks, cooked
+   READ(10) is illegal there ("illegal mode for this track"), and the big
+   readahead bursts those probes generate (60-block, 10+ segment scatterlists)
+   wedge some usb bridges hard: dwc2 scatterlist error, a 30-SECOND block-layer
+   timeout, then a usb reset - observed twice per Policenauts session, which is
+   why an audio-tailed disc "loads slow" while a data-tailed one flies. we
+   cannot stop the probe, but with readahead at zero its reads shrink to single
+   pages that fail in milliseconds instead of wedging the bridge. our own SG_IO
+   reads bypass the page cache entirely, so this costs us nothing. */
+static void quiet_block_probes(const char *dev)
+{
+	const char *name = strrchr(dev, '/');
+	name = name ? name + 1 : dev;
+
+	char path[128];
+	snprintf(path, sizeof(path), "/sys/block/%s/queue/read_ahead_kb", name);
+	FILE *f = fopen(path, "w");
+	if (f) {
+		fputs("0", f);
+		fclose(f);
+		printf("physcd: block readahead off for %s (kernel disc probes fail fast now)\n", name);
+	}
+}
+
 // ---------------------------------------------------------------- reads
 
 static int sg_read_cd(int lba, int count, uint8_t flags, int with_sub, uint8_t *dst, int timeout_ms)
@@ -461,6 +488,7 @@ static void try_reattach(void)
 		snprintf(cur_dev, 64, "%s", newdev);
 		pcd.st_reattach++;
 		pcd.consec_fail = 0;
+		quiet_block_probes(cur_dev);   /* a re-enumerated device gets fresh queue defaults */
 		set_speed_cap();
 		printf("physcd: drive re-attached as %s (recovered from a usb reset)\n", newdev);
 	}
@@ -781,6 +809,7 @@ int physcd_open(const char *dev)
 	if (!pcd.cache) { close(pcd.fd); pcd.fd = -1; return -1; }
 	for (int i = 0; i < CACHE_SECTORS; i++) pcd.cache[i].lba = -1;
 
+	quiet_block_probes(cur_dev);
 	set_speed_cap();
 
 	pcd.leadout = 0;

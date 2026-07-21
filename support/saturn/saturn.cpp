@@ -46,10 +46,17 @@ void saturn_poll()
 	static unsigned long poll_timer = 0;
 	static uint8_t last_req = 255;
 
-	/* a physically-swapped disc: adopt its toc (cached, no drive read) and emit
-	   the disc-change STOP transition so a running game / the bios cd player
-	   re-reads the new toc. */
-	if (satcdd.is_phys() && physcd_swap_consume()) satcdd.SwapPhys();
+	/* a physically-swapped disc: adopt its toc (cached, no drive read), show
+	   the guest a real lid-open dwell, then close - it then gets STOP with the
+	   new toc and re-scans. (a bare STOP was hardware-proven insufficient.) */
+	static uint32_t swap_close_at = 0;
+	if (satcdd.is_phys() && physcd_swap_consume() && satcdd.SwapPhys())
+		swap_close_at = GetTimer(PHYSCD_SWAP_DWELL_MS);
+	if (satcdd.is_phys() && swap_close_at && CheckTimer(swap_close_at))
+	{
+		swap_close_at = 0;
+		satcdd.SwapClose();
+	}
 
 	if (!poll_timer || CheckTimer(poll_timer))
 	{

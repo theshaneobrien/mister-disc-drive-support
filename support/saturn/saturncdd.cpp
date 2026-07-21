@@ -438,9 +438,33 @@ int satcdd_t::SwapPhys()
 	this->read_toc = false;
 	this->seek_ring = false;
 	this->seek_ring2 = false;
-	this->lid_open = false;
+	/* hardware testing showed a bare STOP-with-new-toc (the OSD image-swap
+	   transition) is NOT enough for a physical swap: the toc was adopted but
+	   the running bios/game kept its stale state. a real Saturn swap always
+	   shows the lid opening, so emit a genuine OPEN dwell - Process's lid_open
+	   branch sends SATURN_STAT_OPEN (checked FIRST, so nothing defers it) -
+	   and saturn_poll closes the lid after PHYSCD_SWAP_DWELL_MS via
+	   SwapClose(); stop_pend then delivers STOP carrying the new toc. */
+	this->lid_open = true;
 	this->stop_pend = true;
 	return 1;
+}
+
+void satcdd_t::SwapClose()
+{
+	/* a real drive discards mechanical commands issued while the lid is open,
+	   so drop any pend the guest re-latched during the dwell - read_pend ranks
+	   ABOVE stop_pend in Process's chain and never self-clears, so leaving it
+	   set could defer the STOP-with-new-toc indefinitely (the exact stale-toc
+	   symptom this pulse exists to fix). */
+	this->seek_pend = false;
+	this->read_pend = false;
+	this->pause_pend = false;
+	this->read_toc = false;
+	this->seek_ring = false;
+	this->seek_ring2 = false;
+	this->stop_pend = true;   /* re-assert in case a guest STOP consumed it mid-dwell */
+	this->lid_open = false;   /* next Process emits STOP + new toc */
 }
 
 void satcdd_t::Unload()

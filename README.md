@@ -4,6 +4,16 @@ Load almost any CD game on a MiSTer straight from a USB CD or DVD drive, no ripp
 
 This is a fork of Main_MiSTer, the ARM/Linux side of MiSTer. All the work is in userspace, the FPGA never touches the drive, and the disc build leaves the cores stock. The ARM binary just answers the core's sector requests from the real disc instead of from a file on the SD card.
 
+## Features
+
+* Play CD games straight from a USB drive, no ripping: MegaCD, PlayStation, Saturn, NeoGeo CD, and 3DO.
+* The disc is detected automatically and the right core loads.
+* Autoboot when you drop a disc in, or a manual Play row in the menu.
+* RetroAchievements earned straight off the physical disc, on the RA build.
+* Region sorted per core, usually just set it to Auto.
+* CD audio tracks where the core supports them.
+* Acoustic seek: pop a spare disc in and the drive spins and seeks along with games you play off the SD card, for the sound of a real console.
+
 ## Heads up, this was written with AI
 
 Most of the code was written with an AI assistant (Claude), with me steering, reviewing every change, and testing on real hardware. It boots real games, earns achievements off a spinning disc, and has been through adversarial code review. Still, treat it like any hobby fork: back up your working MiSTer binary before you swap this one in.

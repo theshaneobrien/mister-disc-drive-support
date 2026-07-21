@@ -36,6 +36,7 @@
 #define SLOT_SIZE (PHYSCD_RAW + PHYSCD_SUB)
 #define READAHEAD 96                  /* sectors ahead, per window      */
 #define BURST 16                      /* sectors per drive transaction  */
+#define PREWARM_SECTORS 768           /* cold-start spin-up read (~10s)  */
 #define STATS_MS 5000
 
 /*
@@ -159,9 +160,11 @@ static struct {
 	volatile int swap_ready;      /* a swap happened; the new toc is loaded     */
 	volatile int swapping;        /* reload in flight: the read path serves zeros */
 	volatile int last_win;        /* window of the most recent real read; -1 = none yet */
+	volatile int prewarm;         /* cold-start spin-up: next lba to pre-read; -1 = idle */
+	volatile int prewarm_end;     /* stop pre-reading at this lba */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0 };
 
 static int track_of(int lba)
 {
@@ -612,6 +615,25 @@ static void *prefetch_thread(void *arg)
 			swap_was_present = present;
 		}
 
+		/* cold-start spin-up: on a fresh audio-first mount, aggressively read a
+		   deep lead of the first audio track BEFORE the core plays, so the drive
+		   reaches full read speed and the cdda cache is filled - otherwise the
+		   drive's multi-second spin-up starves the first several seconds of
+		   playback. stops the instant the core issues its first read (last_win
+		   set) or once the lead is built, and yields to any waiting consumer. */
+		if (pcd.prewarm >= 0) {
+			if (pcd.last_win >= 0 || pcd.prewarm >= pcd.prewarm_end
+			    || pcd.consec_fail >= 8 || pcd.leadout <= 0) {
+				pcd.prewarm = -1;   /* core read, lead built, drive struggling, or toc swapping */
+			} else if (!pcd.sync_pending) {
+				int pw = pcd.prewarm;
+				fill_cache(pw, BURST, 0);
+				pcd.prewarm = pw + BURST;
+				last_io = now_ms();
+				continue;
+			}
+		}
+
 		/* serve the neediest active window, alternating which one
 		   gets looked at first so neither stream starves */
 		pthread_mutex_lock(&pcd.lock);
@@ -761,6 +783,7 @@ int physcd_open(const char *dev)
 	pcd.sub_ok = -1;
 	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; }
 	pcd.last_win = -1;
+	pcd.prewarm = -1;
 	pcd.st_hit = pcd.st_miss = 0;
 	pcd.st_worst_ms = 0.0;
 	pcd.running = 1;
@@ -916,6 +939,33 @@ int physcd_load_toc(toc_t *toc)
 	pcd.st_worst_ms = pcd.st_worst_io_ms = 0.0;
 
 	pcd.leadout = lead.cdte_addr.lba;         /* unblocks prefetch    */
+
+	/* cold-start spin-up pre-warm, audio-first discs only (a pure audio cd or
+	   a cd-extra album, whose track 1 is audio). such a disc plays as audio
+	   the moment the core's cd player opens, but a cold drive's spin-up takes
+	   SECONDS - the cdda prefetch cannot out-read a not-yet-at-speed drive, so
+	   the first ~6s stutter ("durr durr") until it ramps. arm the cdda window
+	   and queue a deep read of the first audio track so the prefetch thread
+	   spins the drive up AND fills the cache before playback. the psx read path
+	   subtracts the 150 pregap, so tracks[0].start is the exact lba the core
+	   will ask for. games (data-first) skip this and stay lazy; a slow
+	   multisession data track is never pre-warmed. */
+	pcd.prewarm = -1;
+	if (pcd.ntrk && pcd.trk[0].audio) {
+		int pw_end = toc->tracks[0].start + PREWARM_SECTORS;
+		if (pw_end > pcd.trk[0].end) pw_end = pcd.trk[0].end;  /* stay inside track 1 */
+		if (pw_end > pcd.leadout)    pw_end = pcd.leadout;
+		/* publish the payload (window + bound) BEFORE the arm flag, mirroring
+		   how leadout is written last to unblock the prefetch: the prefetch
+		   thread gates on pcd.prewarm, so a store fence keeps it from seeing
+		   the flag armed while prewarm_end is still stale (which would abort
+		   the pre-warm and silently give back the cold-start stutter). */
+		pcd.cursor[1] = toc->tracks[0].start;
+		pcd.wactive[1] = 1;
+		pcd.prewarm_end = pw_end;
+		__sync_synchronize();
+		pcd.prewarm = toc->tracks[0].start;
+	}
 
 	printf("\x1b[32mphyscd: toc loaded, %d tracks, leadout %d, subchannel %s\n\x1b[0m",
 		n, pcd.leadout,

@@ -81,7 +81,7 @@ That mounts the drive into whatever CD core is already running.
 
 Multi disc games work with real discs. On PlayStation you play until the game asks for the next disc, eject, put the next one in, and the game carries on by itself. Tested with Final Fantasy VII on retail discs, it just notices, no buttons, no menus.
 
-The one I'm most happy with is Vib Ribbon. Boot the game disc, then swap in any music CD you own and it builds levels from your album. Exactly like the real PlayStation, shelf of CDs and all. It can be a little flakey, but I think it's a timing issue (working on it!)
+The one I'm most happy with is Vib Ribbon. Boot the game disc, then swap in any music CD you own and it builds levels from your album. Exactly like the real PlayStation, shelf of CDs and all.
 
 Saturn multi disc games take one extra step. The Saturn runs a disc change through its BIOS, so after you swap it checks the new disc and offers Start Application. Select that and the game carries on. Saturn multi disc games save before a swap as part of their normal flow, so nothing is lost. The console even reports Drive Door Open while the tray is out, which is a nice touch. Not sure how D plays like this tbh.
 

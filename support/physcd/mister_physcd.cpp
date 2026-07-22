@@ -1229,14 +1229,38 @@ void physcd_prewarm_blocking(void)
 		if (!fill_cache(wlba, SYNC_BURST, 1)) { warm = 1; break; }
 	}
 	if (warm) {
-		/* prime a short lead (fast now) so the core's first reads are hits,
-		   and point the data-window cursor here so the prefetch thread keeps
+		/* SEEK-CALIBRATION pass. a spinning platter is only half of warm: a
+		   cold drive's first LONG-THROW seeks run ~270ms+ (servo/sled
+		   settling), and the cd-i core grants exactly 250ms of simulated
+		   seek time (its RTL kSeekTime) before it starts consuming - so the
+		   first cutscene's segment seeks each lose that race by ~20ms, the
+		   flushed 27-sector core fifo comes up empty, and the CDIC replays
+		   the last audio buffer = the fmv "doubled voices" (measured: 18
+		   misses, worst 271ms, on an otherwise perfect cold boot; the same
+		   seeks on a settled drive run tens of ms). exercise the sled
+		   across the disc NOW, before the core is told a disc exists, so
+		   its first real seeks land inside the grace window. sync fills
+		   only (they never stamp slots on failure); a failed burst still
+		   moved the head, which is the point. */
+		int span = pcd.leadout - wlba;
+		if (span > 8 * SYNC_BURST) {
+			static const int quarters[] = { 2, 3, 1 };   /* mid, outer, back in */
+			for (unsigned i = 0; i < sizeof(quarters) / sizeof(quarters[0]); i++) {
+				int slba = wlba + (int)(((int64_t)span * quarters[i]) / 4);
+				if (slba + SYNC_BURST > pcd.leadout) slba = pcd.leadout - SYNC_BURST;
+				fill_cache(slba, SYNC_BURST, 1);
+			}
+		}
+
+		/* prime a short lead at the start LAST, so any direct-mapped window
+		   collisions from the seek pass are overwritten and the lead is
+		   intact; point the data cursor here so the prefetch thread keeps
 		   pulling ahead from the disc start. */
 		for (int i = 1; i < 8; i++)
 			if (fill_cache(wlba + i * SYNC_BURST, SYNC_BURST, 1)) break;
 		pcd.cursor[0] = wlba;
 		pcd.wactive[0] = 1;
-		printf("physcd: drive spun up + primed in %.0f ms\n", now_ms() - w0);
+		printf("physcd: drive spun up + seek-warmed + primed in %.0f ms\n", now_ms() - w0);
 	}
 }
 

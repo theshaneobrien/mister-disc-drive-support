@@ -394,7 +394,19 @@ static int load_phys(toc_t* table)
 	else if (table->phys) unload_phys(table);
 	else unload_cue(table);
 
-	if (physcd_open(NULL) || physcd_load_toc(table) || !table->last)
+	if (physcd_open(NULL))
+	{
+		physcd_close();
+		return 0;
+	}
+
+	/* cd-i streams voice/fmv live and long-throws between level data and the
+	   voice bank against the cdic's 250ms seek grace - opt into the data-only
+	   speed uncap (native CAV = fast long seeks). must precede load_toc so
+	   the per-media speed apply sees it. cd-i only; other cores stay at 4x. */
+	physcd_speed_uncap(1);
+
+	if (physcd_load_toc(table) || !table->last)
 	{
 		physcd_close();
 		return 0;

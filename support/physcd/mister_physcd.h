@@ -118,6 +118,14 @@ void physcd_prewarm_blocking(void);
 // full story). idempotent; call once per process start.
 void physcd_quiet_udev(void);
 
+// opt this mount into running the drive UNCAPPED on data-only discs (native
+// CAV speed management = fast long-throw seeks). for cores that stream live
+// and long-throw mid-stream against a hard deadline (cd-i voice clips); the
+// proven-at-4x cores keep their exact drive profile by not calling this.
+// call between physcd_open and physcd_load_toc; cleared by physcd_close.
+// discs with audio tracks stay capped even when opted in.
+void physcd_speed_uncap(int enable);
+
 // disc fingerprint for the autodetect daemon and menu display
 typedef enum {
 	PHYSCD_DISC_NONE = 0,

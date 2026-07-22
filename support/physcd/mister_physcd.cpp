@@ -164,9 +164,10 @@ static struct {
 	volatile int prewarm;         /* cold-start spin-up: next lba to pre-read; -1 = idle */
 	volatile int prewarm_end;     /* stop pre-reading at this lba */
 	volatile int swap_ejected;    /* mid-swap: disc physically out, new toc not loaded yet */
+	int uncap;                    /* opt-in data-only speed uncap (physcd_speed_uncap) */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0 };
 
 /* "a swap happened during this mount" must survive the core-exit exec (the
    menu runs in a FRESH process - fpga_load_rbf execs; see physcd_autoboot.h,
@@ -223,10 +224,14 @@ static void set_speed_cap()
 {
 	if (pcd.fd < 0) return;
 
+	/* the uncap is OPT-IN per core (physcd_speed_uncap), not blanket: only a
+	   core that streams live and long-throws mid-stream against a hard
+	   deadline (cd-i) benefits, and the proven-at-4x cores keep their exact
+	   drive profile. even opted in, a disc WITH audio tracks stays capped. */
 	int audio = 0;
 	for (int i = 0; i < pcd.ntrk; i++)
 		if (pcd.trk[i].audio) audio = 1;
-	int nx = (pcd.ntrk > 0 && !audio) ? 0 : PHYSCD_SPEED_NX;
+	int nx = (pcd.uncap && pcd.ntrk > 0 && !audio) ? 0 : PHYSCD_SPEED_NX;
 
 	if (ioctl(pcd.fd, CDROM_SELECT_SPEED, nx) < 0)
 		printf("physcd: speed cap not supported, drive keeps its default\n");
@@ -234,6 +239,15 @@ static void set_speed_cap()
 		printf("physcd: speed capped at %dx (~%d KB/s, need 172)\n", nx, nx * 177);
 	else
 		printf("physcd: data-only disc - speed uncapped (native CAV, fast long seeks)\n");
+}
+
+/* opt this mount into the data-only speed uncap (see set_speed_cap). call
+   between physcd_open and physcd_load_toc; cleared by physcd_close so no
+   other core inherits it. */
+void physcd_speed_uncap(int enable)
+{
+	pcd.uncap = enable ? 1 : 0;
+	if (pcd.fd >= 0 && pcd.ntrk > 0) set_speed_cap();
 }
 
 /* defang the kernel's block-layer probing of our drive. after a media change,
@@ -1762,5 +1776,6 @@ void physcd_close()
 	pcd.leadout = 0;
 	pcd.ntrk = 0;
 	pcd.first_data_lba = -1;
+	pcd.uncap = 0;        /* the speed uncap is per-mount opt-in, never inherited */
 	cur_dev[0] = 0;
 }

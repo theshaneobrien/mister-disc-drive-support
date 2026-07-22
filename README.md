@@ -6,7 +6,7 @@ This is a fork of Main_MiSTer, the ARM/Linux side of MiSTer. All the work is in 
 
 ## Features
 
-* Play CD games straight from a USB drive, no ripping: MegaCD, PlayStation, Saturn, NeoGeo CD, and 3DO.
+* Play CD games straight from a USB drive, no ripping: MegaCD, PlayStation, Saturn, NeoGeo CD, 3DO, TurboGrafx-CD, and CD-i.
 * Disc swapping. A multi disc PlayStation game asks for the next disc, you swap it, it keeps playing. ([Video](https://youtu.be/J477S55O5DE))
 * Vib Ribbon with your own music. Boot the game, swap in any album off your shelf. ([Video](https://youtu.be/msHR5iKsleY))
 * Audio CDs. Put a music disc in and the MiSTer boots a console's built in CD player. Swap albums whenever. Choose your default console as a player. ([Video](https://youtu.be/r3Z2uLo_iXA))
@@ -93,7 +93,7 @@ echo swap_phys > /dev/MiSTer_cmd
 
 ## Audio CDs
 
-The MiSTer is now a CD player. Put a music CD in at the menu and it boots into a console's built in CD player, the same player the real hardware shipped with. PlayStation by default, and PHYSCD_AUDIO_CORE in MiSTer.ini picks the Saturn, Mega CD, or NeoGeo CD player instead if you prefer one of those.
+The MiSTer is now a CD player. Put a music CD in at the menu and it boots into a console's built in CD player, the same player the real hardware shipped with. PlayStation by default, and PHYSCD_AUDIO_CORE in MiSTer.ini picks the Saturn, Mega CD, NeoGeo CD, or TurboGrafx-CD player instead if you prefer one of those.
 
 Swap albums live and the player picks up the new disc and its track list. The start of an audio disc is buffered while the drive spins up, so track one comes in clean.
 
@@ -106,7 +106,7 @@ PHYSCD_AUTOBOOT=1     ; 1 auto-loads a disc at the menu (default), 0 is manual, 
 PHYSCD_MOUNT_DELAY=2  ; seconds to let a core settle before mounting, raise it if a game misses the disc
 PHYSCD_DEVICE=        ; optional, pin one drive such as /dev/sr1, blank means autodetect
 PHYSCD_ACOUSTIC=0     ; 1 = a spare disc in the drive spins and seeks along with image games, see below
-PHYSCD_AUDIO_CORE=PSX ; which console's CD player an audio disc boots: PSX, MegaCD, Saturn, or NeoGeo
+PHYSCD_AUDIO_CORE=PSX ; which console's CD player an audio disc boots: PSX, MegaCD, Saturn, NeoGeo, or TurboGrafx16
 ```
 
 ## Acoustic seek / Disc Mirroring

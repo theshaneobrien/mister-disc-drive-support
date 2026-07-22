@@ -201,17 +201,39 @@ static double now_ms()
 	return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
-/* linux turns Nx into kB/s (N*177) for GPCMD_SET_SPEED; 0 would mean
-   maximum. plenty of drives ignore the command entirely - best effort,
-   and re-applied per disc because a media change resets it on many. */
+/* linux turns Nx into kB/s (N*177) for GPCMD_SET_SPEED; 0 means maximum.
+   plenty of drives ignore the command entirely - best effort, and
+   re-applied per disc because a media change resets it on many.
+
+   DATA-ONLY discs run UNCAPPED (drive native speed management, i.e. CAV -
+   constant rpm): the cap puts the drive in a constant-data-rate mode where
+   a long-throw seek pays a spindle speed-match on top of the sled move,
+   and measured WARM random access was ~294ms - which loses the cd-i
+   core's hardcoded 250ms simulated-seek grace on EVERY voice-clip seek
+   (the fmv/voice "doubled syllables": the flushed core fifo starves a few
+   75Hz ticks and the CDIC replays the last audio buffer). games that
+   stream live from disc (cd-i) jump between level data and voice banks
+   half a disc apart, so long-throw latency IS the product. this drive's
+   native max is only ~4-6x anyway (comment at PHYSCD_SPEED_NX), so
+   uncapping changes the speed-management mode, not really the speed.
+   discs WITH audio tracks keep the cap: cdda is sequential (no long
+   throws to hide) and 4x keeps old/warped albums readable and the drive
+   quiet under music. */
 static void set_speed_cap()
 {
 	if (pcd.fd < 0) return;
-	if (ioctl(pcd.fd, CDROM_SELECT_SPEED, PHYSCD_SPEED_NX) < 0)
+
+	int audio = 0;
+	for (int i = 0; i < pcd.ntrk; i++)
+		if (pcd.trk[i].audio) audio = 1;
+	int nx = (pcd.ntrk > 0 && !audio) ? 0 : PHYSCD_SPEED_NX;
+
+	if (ioctl(pcd.fd, CDROM_SELECT_SPEED, nx) < 0)
 		printf("physcd: speed cap not supported, drive keeps its default\n");
+	else if (nx)
+		printf("physcd: speed capped at %dx (~%d KB/s, need 172)\n", nx, nx * 177);
 	else
-		printf("physcd: speed capped at %dx (~%d KB/s, need 172)\n",
-			PHYSCD_SPEED_NX, PHYSCD_SPEED_NX * 177);
+		printf("physcd: data-only disc - speed uncapped (native CAV, fast long seeks)\n");
 }
 
 /* defang the kernel's block-layer probing of our drive. after a media change,

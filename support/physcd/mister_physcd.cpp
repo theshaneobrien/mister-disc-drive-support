@@ -1131,22 +1131,39 @@ int physcd_current_toc(toc_t *toc)
 	return 0;
 }
 
-/* spin a cold usb drive up to read speed and prime the start of the disc BEFORE
- * the core begins reading. a cold drive's first physical read can take 2-3s
- * while the platter reaches speed; a core that reads the disc the instant it is
- * mounted (cd-i's bios does) then stalls repeatedly through its initial load,
- * and a real-time fmv stream fed late makes the audio decoder echo. this
- * front-loads that unavoidable cold-read wait into ONE spin-up at mount instead
- * of scattering multi-second stalls across the load; on a warm drive (a core
- * reset onto an already-spinning platter) it returns almost immediately.
+/* prepare a cold usb drive for a core that reads the disc the instant it mounts
+ * (cd-i's bios does). two things, in order:
  *
- * safe from the mount path, which runs BEFORE the core is told a disc is present
- * (so no fpga sector request is waiting on us here), and a cold miss already
- * blocks the fpga thread via read_sector_impl's sync fill - this replaces many
- * such blocks with one. modeled on the swap wake-before-announce. */
+ * 1. STOP udev seesawing the head. THE real cause of cd-i cold-load choppiness
+ *    (RTL + kernel review, hardware-confirmed): a cold, spinning-up drive throws
+ *    a UNIT ATTENTION ("medium may have changed") on OUR SG_IO reads; the scsi
+ *    layer raises a media-change event; udev then runs blkid, which cooked-reads
+ *    the disc START (block 0 / iso PVD at 16). Those probes drag the single
+ *    optical head to the inner edge while our prefetch reads deep (lba ~230000),
+ *    so every deep read pays a full-stroke seek = 2-3s (vs 6-72ms settled). The
+ *    cd-i core's 27-sector fifo then underruns -> missed sector irq -> cpu stall
+ *    (the DUUR) and a replayed adpcm buffer (the fmv "audio doubling"). Neither
+ *    read_ahead_kb=0 nor events_poll_msecs=0 touch the UA/udev path, and draining
+ *    the UA ourselves loses the race (the drive keeps throwing fresh ones). What
+ *    works (hardware-confirmed live): pause udev's exec queue across the cold
+ *    window so it cannot probe. Restored by a DETACHED child after the drive has
+ *    settled, so it survives even the core-load exec (a leaked pause would wedge
+ *    all hotplug until reboot). Our own eject/swap detection uses
+ *    CDROM_DRIVE_STATUS, not udev, so this does not affect it.
+ *
+ * 2. Spin the platter up + prime the disc start, so the bios's first reads hit a
+ *    warm drive. Blocks the mount path, which runs BEFORE the core is told a disc
+ *    is present (no fpga read waits on us); on a warm drive it returns at once. */
 void physcd_prewarm_blocking(void)
 {
 	if (pcd.fd < 0 || pcd.ntrk < 1 || pcd.leadout <= 0) return;
+
+	/* fire immediately at mount - "too late does nothing" once the drive settles.
+	   20s covers the cold spin-up window after which the drive stops emitting the
+	   media-change UAs. the (sleep; start) subshell is backgrounded and reparented
+	   to init, so the restore is independent of this process's lifetime. */
+	system("udevadm control --stop-exec-queue >/dev/null 2>&1; "
+	       "(sleep 20; udevadm control --start-exec-queue >/dev/null 2>&1) &");
 
 	int wlba = pcd.trk[0].start;
 	double w0 = now_ms();

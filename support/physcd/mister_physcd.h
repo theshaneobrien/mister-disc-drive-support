@@ -65,6 +65,12 @@ void physcd_swap_enable(int enable);
 int physcd_swap_consume(void);
 int physcd_swap_ejected(void);
 
+// did a swap complete during the last mount session? read-and-clear, and
+// file-backed so it survives the core-exit exec (the menu is a fresh
+// process). the menu's autoboot uses it so a disc swapped in MID-GAME is
+// treated as already-played on core exit, not auto-launched as a fresh insert.
+int physcd_swap_happened(void);
+
 // build a mister toc_t from the drive TOC. sets toc->phys = 1,
 // invalidates the sector cache and probes subchannel capability.
 // data track sector size is always reported as 2352 (raw reads).

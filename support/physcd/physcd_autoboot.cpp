@@ -442,6 +442,7 @@ int physcd_autoboot_menu_tick(void)
 	{
 		ab_latched = 0;              /* new media clears the latch */
 		unlink(BOOTED);              /* and forgets what we booted */
+		physcd_swap_happened();      /* consume+discard: the swapped disc left too */
 		if (ab_state != AB_LOADING)
 		{
 			if (ab_state != AB_IDLE) banner_clear();
@@ -461,10 +462,23 @@ int physcd_autoboot_menu_tick(void)
 			int last = 0;
 			FILE *b = fopen(BOOTED, "r");
 			if (b) { if (fscanf(b, "%d", &last) != 1) last = 0; fclose(b); }
-			if (last == (int)type)
+			int swapped = physcd_swap_happened();
+			if (last == (int)type || swapped)
 			{
-				printf("physcd: %s disc already booted, not repeating\n",
-					physcd_disc_name(type));
+				/* a disc swapped in DURING the last game (vib ribbon's music
+				   cd, a multi-disc game's next disc) has already been played:
+				   treat it as booted and refresh the marker, or its TYPE
+				   mismatch against the original game reads as a fresh insert
+				   and quitting to the menu auto-launches it. eject and
+				   reinsert still boots it fresh, as a new insert should. */
+				if (swapped && last != (int)type)
+				{
+					FILE *w = fopen(BOOTED, "w");
+					if (w) { fprintf(w, "%d\n", (int)type); fclose(w); }
+				}
+				printf("physcd: %s disc already %s, not repeating\n",
+					physcd_disc_name(type),
+					swapped && last != (int)type ? "played (swapped in mid-game)" : "booted");
 				ab_latched = 1;
 				return 0;
 			}

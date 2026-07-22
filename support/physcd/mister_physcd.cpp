@@ -168,6 +168,11 @@ static struct {
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
 	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0 };
 
+/* "a swap happened during this mount" must survive the core-exit exec (the
+   menu runs in a FRESH process - fpga_load_rbf execs; see physcd_autoboot.h,
+   it is why the autoboot markers are files). same trick here. */
+#define PHYSCD_SWAPPED_MARKER "/tmp/physcd_swapped"
+
 static int track_of(int lba)
 {
 	for (int i = 0; i < pcd.ntrk; i++)
@@ -634,8 +639,50 @@ static void *prefetch_thread(void *arg)
 				physcd_forget_disc();
 				int ok = !physcd_load_toc(&scratch);
 				pthread_mutex_unlock(&pcd.io);
+				/* pcd.swapping stays SET through the wake below: the running
+				   game still polls its OLD disc's lbas, and with swapping up
+				   those reads return instant zeros instead of wrong-position
+				   3s sync stalls against the new toc that would fight the
+				   wake head-to-head. */
+				if (ok) {
+					/* wake the drive BEFORE the announce. a freshly inserted
+					   disc spins for its firmware toc read then idles (the
+					   kernel probe that kept it spinning by accident was
+					   defanged in 28643ad), and the game's first read then
+					   races the ~2.5s spin-up against the 3s sync timeout -
+					   the flaky vib ribbon swap. SYNC fills only: they fail
+					   fast and never stamp slots (the background ladder would
+					   poison track 1 with permanent zero cache hits on a cold
+					   NAK). loop until ONE burst genuinely succeeds - proof
+					   the platter is at speed - or give up and let the gate
+					   retry the whole reload. */
+					double w0 = now_ms();
+					int warm = 0;
+					int wlba = scratch.tracks[0].start;
+					while (now_ms() - w0 < 8000) {
+						if (!fill_cache(wlba, SYNC_BURST, 1)) { warm = 1; break; }
+					}
+					if (warm) {
+						/* at speed: prime a short lead (fast now), and for an
+						   audio-first disc keep the lead growing until the
+						   game's first read - the window prefetch yields to
+						   consumers, so this cannot starve the announce. */
+						for (int i = 1; i < 8; i++)
+							if (fill_cache(wlba + i * SYNC_BURST, SYNC_BURST, 1)) break;
+						if (pcd.trk[0].audio) { pcd.cursor[1] = wlba; pcd.wactive[1] = 1; }
+						printf("physcd: disc swap - drive awake in %.0f ms\n", now_ms() - w0);
+					}
+					ok = warm;
+				}
 				pcd.swapping = 0;
 				if (ok) {
+					/* the menu must learn this disc was swapped in mid-game
+					   (else its TYPE mismatch vs the booted game reads as a
+					   fresh insert and core-exit auto-launches it). the fact
+					   crosses the core-exit exec as a file, like BOOTED. */
+					FILE *sf = fopen(PHYSCD_SWAPPED_MARKER, "w");
+					if (sf) fclose(sf);
+
 					/* publish the reloaded trk[]/leadout BEFORE the swap_ready
 					   flag the poll thread gates on, so a weakly-ordered arm
 					   core cannot observe the flag with a stale toc (matches the
@@ -646,8 +693,9 @@ static void *prefetch_thread(void *arg)
 					swap_ejected = 0;
 					printf("physcd: disc swap - new toc loaded\n");
 				}
-				/* load failed (drive not settled): swap_ejected stays set, the
-				   gate above keeps retrying every SWAP_CHECK_MS until it reads */
+				/* load or wake failed (drive not settled / disc unreadable):
+				   swap_ejected stays set, the gate above keeps retrying every
+				   SWAP_CHECK_MS until the disc genuinely reads */
 			}
 			swap_was_present = present;
 		}
@@ -867,11 +915,22 @@ int physcd_swap_ejected(void)
 	return pcd.swap_enable && pcd.swap_ejected;
 }
 
+// did a physical swap complete during the last mount session? read-and-clear;
+// the menu's autoboot consults it on core exit so a disc the user swapped in
+// MID-GAME (vib ribbon's music cd) is treated as already-played, not as a
+// fresh insert to auto-launch. FILE-backed because the menu runs in a fresh
+// process (core exit is an exec); unlink doubles as an atomic read-and-clear.
+int physcd_swap_happened(void)
+{
+	return unlink(PHYSCD_SWAPPED_MARKER) == 0;
+}
+
 // arm/disarm mid-mount disc-swap detection. the core calls this on a physical
 // mount so the prefetch thread watches for an eject-then-insert.
 void physcd_swap_enable(int enable)
 {
 	pcd.swap_enable = enable ? 1 : 0;
+	if (enable) unlink(PHYSCD_SWAPPED_MARKER);  /* a new mount session starts clean */
 	if (!enable) pcd.swap_ejected = 0;
 	if (!enable) pcd.swap_ready = 0;
 }

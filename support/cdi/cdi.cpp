@@ -18,6 +18,7 @@
 #include "cdi.h"
 #include "../../cd.h"
 #include "../chd/mister_chd.h"
+#include "../physcd/mister_physcd.h"
 #include <libchdr/chd.h>
 #include <arpa/inet.h>
 #include "cdg_unpacker.hpp"
@@ -119,6 +120,11 @@ static void unload_chd(toc_t* table)
 	}
 	if (chd_hunkbuf)
 		free(chd_hunkbuf);
+	/* chd_hunkbuf is a file-static, not part of toc_t, so the memset below
+	   does NOT clear it. null it here or a later unload_chd double-frees it -
+	   reachable now that load_phys() calls unload_chd on a chd->phys swap
+	   without the realloc load_chd would do (mirrors psx.cpp). */
+	chd_hunkbuf = NULL;
 	memset(table, 0, sizeof(toc_t));
 	chd_hunknum = -1;
 }
@@ -353,21 +359,75 @@ static int load_cue(const char* filename, toc_t* table)
 	return 1;
 }
 
+/* ---- physcd: physical usb cd-rom as a third source (mirrors the psx pattern) ---- */
+
+static void unload_phys(toc_t* table)
+{
+	if (table->phys) physcd_close();
+	memset(table, 0, sizeof(toc_t));
+}
+
+/* physcd reports drive-absolute lbas with exclusive ends; cd-i (like the
+   other cores) wants the same faked 150-sector pregap the chd/cue loaders
+   apply, so core lba 150 is the first sector of track 1 and the read path's
+   "lba - 150" maps back to drive-absolute. also relabel data tracks
+   TT_MODE1 -> TT_MODE2: physcd tags data as mode1, but cd-i sectors are
+   mode 2, and the classifier in load_cd_image must see mode2 to pick
+   DT_CDROMXA (some cd-i titles misbehave when the disc is tagged DT_CDROM). */
+static void apply_phys_bias(toc_t* table)
+{
+	for (int i = 0; i < table->last; i++)
+	{
+		int len = table->tracks[i].end - table->tracks[i].start;
+		table->tracks[i].indexes[1] = i ? 0 : 150;
+		table->tracks[i].pregap = 0;
+		table->tracks[i].start += 150;
+		table->tracks[i].end = table->tracks[i].start + len - 1;
+		if (table->tracks[i].type == TT_MODE1) table->tracks[i].type = TT_MODE2;
+	}
+	table->end = table->tracks[table->last - 1].end + 1;
+}
+
+static int load_phys(toc_t* table)
+{
+	if (table->chd_f) unload_chd(table);
+	else if (table->phys) unload_phys(table);
+	else unload_cue(table);
+
+	if (physcd_open(NULL) || physcd_load_toc(table) || !table->last)
+	{
+		physcd_close();
+		return 0;
+	}
+
+	apply_phys_bias(table);
+	return 1;
+}
+
 static int load_cd_image(const char* filename, toc_t* table)
 {
 	int result = 0;
 
-	const char* ext = strrchr(filename, '.');
-	if (!ext)
-		return 0;
-
-	if (!strncasecmp(".chd", ext, 4))
+	if (!strcmp(filename, PHYSCD_SENTINEL))
 	{
-		result = load_chd(filename, table);
+		// physical usb drive. fall through (do NOT early-return) so the
+		// audio-cd probe + disc-type classifier below run over the phys toc.
+		result = load_phys(table);
 	}
-	else if (!strncasecmp(".cue", ext, 4))
+	else
 	{
-		result = load_cue(filename, table);
+		const char* ext = strrchr(filename, '.');
+		if (!ext)
+			return 0;
+
+		if (!strncasecmp(".chd", ext, 4))
+		{
+			result = load_chd(filename, table);
+		}
+		else if (!strncasecmp(".cue", ext, 4))
+		{
+			result = load_cue(filename, table);
+		}
 	}
 
 	// On a CDI 210/05 the SERVO has to provide the info
@@ -916,7 +976,13 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 			{
 				if (lba >= (toc.tracks[i].start - toc.tracks[i].pregap) && lba <= toc.tracks[i].end)
 				{
-					if (!toc.chd_f)
+					if (toc.phys)
+					{
+						/* prefetch head start; the core models its own seek
+						   latency, so the sector is ready when it reads it */
+						physcd_seek_hint(lba - 150);
+					}
+					else if (!toc.chd_f)
 					{
 						if (toc.tracks[i].offset)
 						{
@@ -959,7 +1025,18 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 						bool subc_filled{false};
 						bool reinterleave_subcode{false};
 
-						if (toc.chd_f)
+						if (toc.phys)
+						{
+							/* raw mode-2 frame straight from the drive - the cdic
+							   wants the whole 2352 (sync+header+subheader). no
+							   byteswap: the drive returns cdda little-endian like a
+							   bin, only chd stores it big-endian. */
+							int read_lba = lba - 150;
+							if (physcd_read_sector(read_lba, buffer, NULL))
+								memset(buffer, 0, CDI_SECTOR_LEN);
+							/* subc_filled stays false -> rw[] zeroed downstream */
+						}
+						else if (toc.chd_f)
 						{
 							// The "fake" 150 sector pregap moves all the LBAs up by 150, so adjust here to read where the core actually wants data from
 							int read_lba = lba - 150;
@@ -1085,7 +1162,7 @@ static void mount_cd(int size, int index)
 /// Must be static to keep the value between mount calls
 static char last_dir[1024] = "";
 
-void cdi_mount_cd(int s_index, const char* filename)
+int cdi_mount_cd(int s_index, const char* filename)
 {
 	int loaded = 0;
 
@@ -1093,26 +1170,32 @@ void cdi_mount_cd(int s_index, const char* filename)
 	{
 		if (load_cd_image(filename, &toc) && toc.last)
 		{
-			const char* p = strrchr(filename, '/');
-			int cur_len = p ? p - filename : 0;
-			int old_len = strlen(last_dir);
-
-			int same_game = old_len && (cur_len == old_len) && !strncmp(last_dir, filename, old_len);
-
-			// Handle multi disc titles and avoid re-mounting the save file
-			// to avoid resets on the core
-			if (!same_game)
+			// A physical disc has no game folder, so keep the shared
+			// games/CD-i timekeeper nvram that core boot already mounted and
+			// skip the per-game save dance (re-mounting a save resets the core).
+			if (strcmp(filename, PHYSCD_SENTINEL))
 			{
-				strncpy(last_dir, filename, sizeof(last_dir));
-				char* p = strrchr(last_dir, '/');
-				if (p)
-					*p = 0;
-				else
-					*last_dir = 0;
+				const char* p = strrchr(filename, '/');
+				int cur_len = p ? p - filename : 0;
+				int old_len = strlen(last_dir);
 
-				// FPGA side will be informed about the mount and perform a reset
-				// if configured to do so
-				cdi_mount_save(last_dir);
+				int same_game = old_len && (cur_len == old_len) && !strncmp(last_dir, filename, old_len);
+
+				// Handle multi disc titles and avoid re-mounting the save file
+				// to avoid resets on the core
+				if (!same_game)
+				{
+					strncpy(last_dir, filename, sizeof(last_dir));
+					char* p = strrchr(last_dir, '/');
+					if (p)
+						*p = 0;
+					else
+						*last_dir = 0;
+
+					// FPGA side will be informed about the mount and perform a reset
+					// if configured to do so
+					cdi_mount_save(last_dir);
+				}
 			}
 
 			prepare_toc_buffer(&toc);
@@ -1125,10 +1208,13 @@ void cdi_mount_cd(int s_index, const char* filename)
 	if (!loaded)
 	{
 		printf("Unmount CD\n");
+		if (toc.phys) unload_phys(&toc);
 		unload_cue(&toc);
 		unload_chd(&toc);
 		mount_cd(0, s_index);
 	}
+
+	return loaded;
 }
 
 void cdi_poll() {}

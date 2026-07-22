@@ -1257,6 +1257,10 @@ physcd_disc_t physcd_identify()
 	if (!physcd_read_sector(base + 16, raw, NULL)) {
 		uint8_t *iso = raw + 16;
 		if (memcmp(iso + 1, "CD001", 5)) iso = raw + 24;   /* mode2 form1 */
+		/* cd-i (green book) uses the iso9660 volume-descriptor slot but with
+		   the "CD-I " standard identifier; mutually exclusive with CD001, so
+		   this never trips over the six CD001 console signatures below. */
+		if (!memcmp(iso + 1, "CD-I ", 5)) return PHYSCD_DISC_CDI;
 		if (!memcmp(iso + 1, "CD001", 5)) {
 			if (!memcmp(iso + 8, "PLAYSTATION", 11)) return PHYSCD_DISC_PSX;
 			if (!memcmp(iso + 8, "NGCD", 4)) return PHYSCD_DISC_NEOGEO;
@@ -1460,6 +1464,7 @@ const char *physcd_console_name(physcd_disc_t t)
 	case PHYSCD_DISC_PCECD:  return "TurboGrafx-CD";
 	case PHYSCD_DISC_NEOGEO: return "Neo Geo CD";
 	case PHYSCD_DISC_3DO:    return "3DO";
+	case PHYSCD_DISC_CDI:    return "CD-i";
 	default:                 return physcd_disc_name(t);
 	}
 }
@@ -1473,6 +1478,7 @@ const char *physcd_disc_name(physcd_disc_t t)
 	case PHYSCD_DISC_PCECD:  return "TurboGrafx CD";
 	case PHYSCD_DISC_NEOGEO: return "NeoGeo CD";
 	case PHYSCD_DISC_3DO:    return "3DO";
+	case PHYSCD_DISC_CDI:    return "CD-i";
 	case PHYSCD_DISC_AUDIO:  return "Audio CD";
 	case PHYSCD_DISC_NONE:   return "No Disc";
 	default:                 return "Unknown";

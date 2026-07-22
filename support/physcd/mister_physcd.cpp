@@ -232,13 +232,25 @@ static void quiet_block_probes(const char *dev)
 	name = name ? name + 1 : dev;
 
 	char path[128];
+	FILE *f;
+
+	/* kill big readahead so the kernel's probe reads are small */
 	snprintf(path, sizeof(path), "/sys/block/%s/queue/read_ahead_kb", name);
-	FILE *f = fopen(path, "w");
-	if (f) {
-		fputs("0", f);
-		fclose(f);
-		printf("physcd: block readahead off for %s (kernel disc probes fail fast now)\n", name);
-	}
+	if ((f = fopen(path, "w"))) { fputs("0", f); fclose(f); }
+
+	/* stop the kernel's periodic media-change poll. on a mode-2 disc (cd-i,
+	   psx) every revalidation cooked-READ(10)s the disc, fails ASC 0x64
+	   ("illegal mode for this track"), and ties the drive up ~1s per probe -
+	   which stalls our SG_IO reads by SECONDS during heavy loading (cd-i fmv
+	   went from a 2.8s worst-miss to 0.27s hardware-confirmed). read_ahead=0
+	   alone did NOT stop these - they are explicit revalidation reads, not
+	   readahead. our own eject/swap detection uses CDROM_DRIVE_STATUS
+	   directly, not this poller, so it is unaffected. (-1 = kernel default
+	   poll on; 0 = poll off.) */
+	snprintf(path, sizeof(path), "/sys/block/%s/events_poll_msecs", name);
+	if ((f = fopen(path, "w"))) { fputs("0", f); fclose(f); }
+
+	printf("physcd: kernel disc probes quieted for %s (readahead + media-change poll off)\n", name);
 }
 
 // ---------------------------------------------------------------- reads

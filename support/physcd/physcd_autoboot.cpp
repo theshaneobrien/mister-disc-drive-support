@@ -22,6 +22,7 @@
 #include "../saturn/saturn.h"
 #include "../neogeo/neogeocd.h"
 #include "../3do/3do.h"
+#include "../pcecd/pcecd.h"
 #include "mister_physcd.h"
 #include "physcd_autoboot.h"
 #include "physcd_acoustic.h"
@@ -54,6 +55,9 @@ static physcd_disc_t physcd_audio_console(void)
 	if (!strcasecmp(c, "NeoGeo") ||
 	    !strcasecmp(c, "NeoGeoCD"))      return PHYSCD_DISC_NEOGEO;
 	if (!strcasecmp(c, "3DO"))           return PHYSCD_DISC_3DO;
+	if (!strcasecmp(c, "TurboGrafx16") ||
+	    !strcasecmp(c, "PCECD") ||
+	    !strcasecmp(c, "PCE"))           return PHYSCD_DISC_PCECD;
 	return PHYSCD_DISC_PSX;
 }
 
@@ -104,7 +108,8 @@ static int mountable(physcd_disc_t t)
 {
 	return t == PHYSCD_DISC_MEGACD || t == PHYSCD_DISC_PSX
 		|| t == PHYSCD_DISC_SATURN || t == PHYSCD_DISC_NEOGEO
-		|| t == PHYSCD_DISC_3DO || t == PHYSCD_DISC_AUDIO;
+		|| t == PHYSCD_DISC_3DO || t == PHYSCD_DISC_PCECD
+		|| t == PHYSCD_DISC_AUDIO;
 }
 
 /* resolve the rbf for a core. on the RA build, PREFER the RA-patched core
@@ -142,6 +147,8 @@ int physcd_mount_current_core(void)
 		mounted = neocd_set_image(PHYSCD_SENTINEL);
 	}
 	else if (is_3do()) mounted = p3do_set_image(0, PHYSCD_SENTINEL);
+	// pcecd_set_image is void; it sets pcecdd.loaded on a good mount
+	else if (is_pce()) { pcecd_set_image(0, PHYSCD_SENTINEL); mounted = pcecdd.loaded; }
 	else recognised = 0;
 
 	if (!recognised)

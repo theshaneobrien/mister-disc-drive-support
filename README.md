@@ -37,10 +37,12 @@ For core requests, I've added everything I own discs for, I'm not sure about tes
 
 ## What you need
 
-* A MiSTer. I have only tested on a DE10-nano. No kernel changes, no FPGA changes. Let me know if it works on other devices!
+* A MiSTer. I have only tested on a DE10-nano. Other users have tested it on a SuperStation and it works for them. No kernel changes, no FPGA changes. Let me know if it works on other devices!
 * A USB CD or DVD drive. Most drives that show up as /dev/sr0 work. There is a probe tool (physcd_probe) you can run on the MiSTer to check one first. The two I have tested:
   * Hitachi LG GP60NB60, https://www.amazon.co.uk/dp/B01G33IRYS (This thing works amazingly)
   * LIUAN External CD DVD Drive, model B0260, https://www.amazon.co.uk/dp/B0BB6YCHK4 (This one kinda sucks, the disc tray won't open if its too warm)
+* Tested by others
+  * SuperDock (Tested by Long-Marsupial3422)
 * A decent power supply for the drive. This one matters. A CD drive pulls a big gulp of current spinning up for a seek, and the DE10-nano's USB or a cheap hub will sag under it, drop the drive off the bus, and take your controllers with it for a minute. Use a powered hub, ideally give the drive its own supply. A game that freezes for a minute then carries on by itself is power, not the software.
 
 ## Setup

@@ -1131,6 +1131,46 @@ int physcd_current_toc(toc_t *toc)
 	return 0;
 }
 
+/* spin a cold usb drive up to read speed and prime the start of the disc BEFORE
+ * the core begins reading. a cold drive's first physical read can take 2-3s
+ * while the platter reaches speed; a core that reads the disc the instant it is
+ * mounted (cd-i's bios does) then stalls repeatedly through its initial load,
+ * and a real-time fmv stream fed late makes the audio decoder echo. this
+ * front-loads that unavoidable cold-read wait into ONE spin-up at mount instead
+ * of scattering multi-second stalls across the load; on a warm drive (a core
+ * reset onto an already-spinning platter) it returns almost immediately.
+ *
+ * safe from the mount path, which runs BEFORE the core is told a disc is present
+ * (so no fpga sector request is waiting on us here), and a cold miss already
+ * blocks the fpga thread via read_sector_impl's sync fill - this replaces many
+ * such blocks with one. modeled on the swap wake-before-announce. */
+void physcd_prewarm_blocking(void)
+{
+	if (pcd.fd < 0 || pcd.ntrk < 1 || pcd.leadout <= 0) return;
+
+	int wlba = pcd.trk[0].start;
+	double w0 = now_ms();
+	int warm = 0;
+
+	/* SYNC fills only - they never stamp slots on a cold NAK. loop until one
+	   burst genuinely completes: on a drive that NAKs while spinning up that
+	   means "platter now at speed", and on one that just reads slowly the
+	   first (slow) burst is itself the spin-up. */
+	while (now_ms() - w0 < 8000) {
+		if (!fill_cache(wlba, SYNC_BURST, 1)) { warm = 1; break; }
+	}
+	if (warm) {
+		/* prime a short lead (fast now) so the core's first reads are hits,
+		   and point the data-window cursor here so the prefetch thread keeps
+		   pulling ahead from the disc start. */
+		for (int i = 1; i < 8; i++)
+			if (fill_cache(wlba + i * SYNC_BURST, SYNC_BURST, 1)) break;
+		pcd.cursor[0] = wlba;
+		pcd.wactive[0] = 1;
+		printf("physcd: drive spun up + primed in %.0f ms\n", now_ms() - w0);
+	}
+}
+
 void physcd_seek_hint(int lba)
 {
 	if (lba < 0 || !pcd.ntrk) return;

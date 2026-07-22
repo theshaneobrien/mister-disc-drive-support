@@ -401,6 +401,9 @@ static int load_phys(toc_t* table)
 	}
 
 	apply_phys_bias(table);
+	/* spin the cold drive up + prime the disc start before the cd-i bios reads,
+	   so the initial load and fmv are not fed by a still-spinning-up drive */
+	physcd_prewarm_blocking();
 	return 1;
 }
 

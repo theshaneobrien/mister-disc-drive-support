@@ -105,6 +105,13 @@ int physcd_read_data2048(int lba, uint8_t *dst);
 // of the new position immediately (call from cdd seek handling).
 void physcd_seek_hint(int lba);
 
+// spin a cold drive up to read speed and prime the start of the disc BEFORE the
+// core begins reading. blocks the caller (up to ~8s on a stone-cold drive,
+// near-instant on a warm one). call from a phys mount, after physcd_load_toc,
+// for a core that reads the disc the instant it is mounted (cd-i's bios does),
+// so its initial load and real-time fmv are not fed by a still-spinning drive.
+void physcd_prewarm_blocking(void);
+
 // disc fingerprint for the autodetect daemon and menu display
 typedef enum {
 	PHYSCD_DISC_NONE = 0,

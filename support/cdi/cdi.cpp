@@ -435,6 +435,13 @@ static int load_cd_image(const char* filename, toc_t* table)
 		if (!ext)
 			return 0;
 
+		/* release a live physical mount FIRST: load_chd/load_cue memset the
+		   toc (clearing toc.phys) without closing the backend, which would
+		   orphan the drive fd + prefetch thread + cache for the session -
+		   with the keepalive spinning the abandoned disc UNCAPPED and
+		   physcd_drive_busy() suppressing acoustic seek for the image game. */
+		if (table->phys) unload_phys(table);
+
 		if (!strncasecmp(".chd", ext, 4))
 		{
 			result = load_chd(filename, table);

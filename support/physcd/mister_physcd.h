@@ -135,8 +135,13 @@ typedef enum {
 	PHYSCD_DISC_PCECD,
 	PHYSCD_DISC_NEOGEO,
 	PHYSCD_DISC_3DO,
-	PHYSCD_DISC_CDI,
+	/* new types go AFTER AUDIO: the /tmp autoboot markers persist these as
+	   raw ints across the core-exit exec, and a no-reboot binary swap would
+	   misread a shifted AUDIO (cdi was briefly inserted before it and an
+	   old marker's 7 then read as cdi = one spurious relaunch). UNKNOWN is
+	   never persisted, so appending before it is always safe. */
 	PHYSCD_DISC_AUDIO,
+	PHYSCD_DISC_CDI,
 	PHYSCD_DISC_UNKNOWN,
 } physcd_disc_t;
 

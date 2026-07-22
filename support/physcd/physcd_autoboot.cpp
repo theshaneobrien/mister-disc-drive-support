@@ -261,15 +261,17 @@ void physcd_autoboot_poll(void)
 
 	int ok = physcd_mount_current_core();
 
-	/* some cores (PCE/TurboGrafx16) raise the OSD themselves when they
-	   boot with no media yet; our direct mount bypasses the file-browser
-	   path that would otherwise close it (menu.cpp IMAGE_SELECTED -> MenuHide),
-	   so the menu is left sitting over the core. close it here - a no-op on
-	   cores that booted clean, and it lets the Info() popup below show even
-	   when the menu was up (Info bails while a menu is open). */
-	if (menu_present()) MenuHide();
+	/* the TurboGrafx16 core raises the OSD itself when it boots with no
+	   media yet; our direct mount bypasses the file-browser path that would
+	   otherwise close it (menu.cpp IMAGE_SELECTED -> MenuHide), so the menu
+	   is left sitting over the core. close it here - gated to PCE because on
+	   the other cores the only way a menu is up at mount time is the USER
+	   opening it during the settle dwell, and closing it out from under them
+	   would be a behavior change vs the proven releases. */
+	if (is_pce() && menu_present()) MenuHide();
 
-	/* Info() works here: the menu is closed in a freshly loaded core */
+	/* Info() works here: no menu is open in a freshly loaded core (and if
+	   the user opened one during the dwell, Info harmlessly skips) */
 	char msg[128];
 	if (ok)
 	{

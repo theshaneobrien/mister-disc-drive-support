@@ -331,12 +331,17 @@ static void install_udev_rule(void)
 		"# and this rule is inert but harmless.\n"
 		"ACTION!=\"remove\", KERNEL==\"sr[0-9]*\", ENV{UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG}=\"1\"\n";
 
-	char cur[768] = {};
+	/* length-aware compare: a truncating read would make strcmp never match
+	   and silently rewrite + udevadm-reload on EVERY process start. size the
+	   buffer from the rule and treat an oversized on-disk file as stale. */
+	size_t rlen = strlen(rule);
+	char cur[1024] = {};
 	FILE *f = fopen(path, "r");
 	if (f) {
-		fread(cur, 1, sizeof(cur) - 1, f);
+		size_t got = fread(cur, 1, sizeof(cur) - 1, f);
 		fclose(f);
-		if (!strcmp(cur, rule)) return;   /* already installed, current text */
+		if (got == rlen && rlen < sizeof(cur) && !memcmp(cur, rule, rlen))
+			return;   /* already installed, current text */
 	}
 
 	f = fopen(path, "w");

@@ -1159,11 +1159,20 @@ void physcd_prewarm_blocking(void)
 	if (pcd.fd < 0 || pcd.ntrk < 1 || pcd.leadout <= 0) return;
 
 	/* fire immediately at mount - "too late does nothing" once the drive settles.
-	   20s covers the cold spin-up window after which the drive stops emitting the
-	   media-change UAs. the (sleep; start) subshell is backgrounded and reparented
-	   to init, so the restore is independent of this process's lifetime. */
-	system("udevadm control --stop-exec-queue >/dev/null 2>&1; "
-	       "(sleep 20; udevadm control --start-exec-queue >/dev/null 2>&1) &");
+	   udevadm lives in /sbin (same as udevd) and system()'s shell PATH may not
+	   include it, which silently no-ops the pause - so set PATH explicitly. The
+	   stop's stderr + exit code go to /tmp/physcd_udev.log so a failure (e.g.
+	   udevadm not found -> rc 127) is diagnosable with one cat. 20s covers the
+	   cold spin-up window after which the drive stops emitting media-change UAs;
+	   the (sleep; start) subshell is backgrounded + reparented to init so the
+	   restore survives this process's core-load exec. */
+	int urc = system("export PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH; "
+	                 "udevadm control --stop-exec-queue 2>/tmp/physcd_udev.log");
+	{ FILE *ul = fopen("/tmp/physcd_udev.log", "a");
+	  if (ul) { fprintf(ul, "physcd: udev stop-exec-queue rc=%d\n", urc); fclose(ul); } }
+	if (urc == 0)
+		system("export PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH; "
+		       "(sleep 20; udevadm control --start-exec-queue >/dev/null 2>&1) &");
 
 	int wlba = pcd.trk[0].start;
 	double w0 = now_ms();

@@ -274,19 +274,26 @@ static void quiet_block_probes(const char *dev)
 	snprintf(path, sizeof(path), "/sys/block/%s/queue/read_ahead_kb", name);
 	if ((f = fopen(path, "w"))) { fputs("0", f); fclose(f); }
 
-	/* stop the kernel's periodic media-change poll. on a mode-2 disc (cd-i,
-	   psx) every revalidation cooked-READ(10)s the disc, fails ASC 0x64
-	   ("illegal mode for this track"), and ties the drive up ~1s per probe -
-	   which stalls our SG_IO reads by SECONDS during heavy loading (cd-i fmv
-	   went from a 2.8s worst-miss to 0.27s hardware-confirmed). read_ahead=0
-	   alone did NOT stop these - they are explicit revalidation reads, not
-	   readahead. our own eject/swap detection uses CDROM_DRIVE_STATUS
-	   directly, not this poller, so it is unaffected. (-1 = kernel default
-	   poll on; 0 = poll off.) */
+	/* the kernel's disc-event poll must stay ON: udev deliberately LOCKS the
+	   tray on insert ("lock tray to enable the receiving of media eject
+	   button events", 60-cdrom_id.rules), which turns the eject button into
+	   a soft REQUEST the drive merely queues - and this poll is the relay
+	   that fetches it (GET_EVENT -> DISK_EJECT_REQUEST uevent -> cdrom_id
+	   --eject-media unlocks and opens). v0.4.0 wrote 0 here (a leftover from
+	   a FALSIFIED choppiness theory - the real fix was the blkid udev rule)
+	   and that killed the eject button on DATA discs across ALL cores (psx,
+	   saturn, megacd, pce, cd-i - hardware-confirmed; audio cds escaped,
+	   most likely because the tray is only locked for data media). also
+	   hardware-confirmed: with the button dead, echo 2000 >
+	   events_poll_msecs popped the queued eject press at once.
+	   write -1 (= follow the kernel default, 2000ms via 60-block.rules) so
+	   a device a v0.4.0 binary already zeroed is HEALED, not just left be.
+	   the poll is a status command - no media reads, no head movement - so
+	   the cd-i seesaw fix (the blkid rule) is unaffected. */
 	snprintf(path, sizeof(path), "/sys/block/%s/events_poll_msecs", name);
-	if ((f = fopen(path, "w"))) { fputs("0", f); fclose(f); }
+	if ((f = fopen(path, "w"))) { fputs("-1", f); fclose(f); }
 
-	printf("physcd: kernel disc probes quieted for %s (readahead + media-change poll off)\n", name);
+	printf("physcd: block probes quieted for %s (readahead off, eject relay on)\n", name);
 }
 
 /* startup environment fix: exempt cd drives from udev's blkid superblock

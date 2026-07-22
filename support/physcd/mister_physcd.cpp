@@ -253,6 +253,75 @@ static void quiet_block_probes(const char *dev)
 	printf("physcd: kernel disc probes quieted for %s (readahead + media-change poll off)\n", name);
 }
 
+/* startup environment fix: exempt cd drives from udev's blkid superblock
+ * probing, via a persistent rules file.
+ *
+ * THE root cause of the cd-i cold-load choppiness + fmv audio doubling
+ * (found by reading the shipped mister rootfs + the 5.15 kernel source, and
+ * consistent with every hardware falsification): 60-persistent-storage.rules
+ * runs the blkid BUILTIN inside a udevd worker for any sr* device whose
+ * media has a data track. blkid buffered-reads the superblock probe chain -
+ * blocks 0/8/16/24/56/128, exactly the dmesg spew - and on a mode-2 disc
+ * every read grinds the drive 1-3s then fails ASC 0x64. The worker runs to
+ * udev's 180s event timeout (the storm "resolving itself"), seesawing the
+ * head against the game's deep reads the whole time. The log fingerprint
+ * proves it is blkid: "async page read" only comes from the bdev pagecache
+ * path, and the kernel's own partition scan reads ONLY block 0 - blocks 8+
+ * can only be a userspace read(). Why every runtime countermeasure failed:
+ * the triggering event is the BOOT COLDPLUG (S10udev's `udevadm trigger`),
+ * which fires long before Main starts, and stop-exec-queue cannot touch an
+ * in-flight worker (falsified on hardware, cditest5/6). Only a rules file
+ * already on disk at boot prevents it.
+ *
+ * The exemption uses the escape hatch upstream provides for exactly this
+ * (60-persistent-storage.rules honors UDEV_DISABLE_PERSISTENT_STORAGE_RULES_
+ * FLAG at its top); mister's own rootfs ships a defang rule of the same
+ * class (60-jms583-phantom.rules). Nothing on mister consumes blkid's cd
+ * fingerprints - usbmount matches only sd and ub devices - so the only loss
+ * is ID_FS_* properties nobody reads. cdrom_id (SG_IO, harmless) still runs.
+ * Idempotent: rewrites only when missing/stale; the current boot's storm is
+ * already past by the time we run, so the rule pays off from the NEXT boot
+ * and for every insert/swap event from now on. */
+static void install_udev_rule(void)
+{
+	static const char *path = "/etc/udev/rules.d/59-physcd-cdrom.rules";
+	static const char *rule =
+		"# installed by physcd (MiSTer-Disc fork). stops udev's blkid builtin\n"
+		"# from superblock-probing cd drives: a mode-2 disc (cd-i, psx) rejects\n"
+		"# cooked reads, so each probe grinds the drive for seconds and fights\n"
+		"# the running game for the drive head. safe: nothing on mister mounts\n"
+		"# or fingerprints cds (usbmount matches sd*/ub* only). delete this file\n"
+		"# and physcd will reinstall it on next start; remove the physcd binary\n"
+		"# and this rule is inert but harmless.\n"
+		"ACTION!=\"remove\", KERNEL==\"sr[0-9]*\", ENV{UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG}=\"1\"\n";
+
+	char cur[768] = {};
+	FILE *f = fopen(path, "r");
+	if (f) {
+		fread(cur, 1, sizeof(cur) - 1, f);
+		fclose(f);
+		if (!strcmp(cur, rule)) return;   /* already installed, current text */
+	}
+
+	f = fopen(path, "w");
+	if (!f) { printf("physcd: cannot write %s\n", path); return; }
+	fputs(rule, f);
+	fflush(f);
+	fsync(fileno(f));
+	fclose(f);
+
+	/* eudev spells it --reload-rules, newer udevadm --reload; try both.
+	   PATH must be explicit - system()'s shell lacks /sbin (bit us once). */
+	system("export PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH; "
+	       "udevadm control --reload-rules 2>/dev/null || udevadm control --reload 2>/dev/null");
+	printf("physcd: installed %s (cd drives exempt from udev blkid probing from next boot)\n", path);
+}
+
+void physcd_quiet_udev(void)
+{
+	install_udev_rule();
+}
+
 // ---------------------------------------------------------------- reads
 
 static int sg_read_cd(int lba, int count, uint8_t flags, int with_sub, uint8_t *dst, int timeout_ms)
@@ -1131,48 +1200,22 @@ int physcd_current_toc(toc_t *toc)
 	return 0;
 }
 
-/* prepare a cold usb drive for a core that reads the disc the instant it mounts
- * (cd-i's bios does). two things, in order:
+/* spin the platter up + prime the disc start before a core that reads the disc
+ * the instant it mounts (cd-i's bios does). Blocks the mount path, which runs
+ * BEFORE the core is told a disc is present (no fpga read waits on us); on a
+ * warm drive it returns at once.
  *
- * 1. STOP udev seesawing the head. THE real cause of cd-i cold-load choppiness
- *    (RTL + kernel review, hardware-confirmed): a cold, spinning-up drive throws
- *    a UNIT ATTENTION ("medium may have changed") on OUR SG_IO reads; the scsi
- *    layer raises a media-change event; udev then runs blkid, which cooked-reads
- *    the disc START (block 0 / iso PVD at 16). Those probes drag the single
- *    optical head to the inner edge while our prefetch reads deep (lba ~230000),
- *    so every deep read pays a full-stroke seek = 2-3s (vs 6-72ms settled). The
- *    cd-i core's 27-sector fifo then underruns -> missed sector irq -> cpu stall
- *    (the DUUR) and a replayed adpcm buffer (the fmv "audio doubling"). Neither
- *    read_ahead_kb=0 nor events_poll_msecs=0 touch the UA/udev path, and draining
- *    the UA ourselves loses the race (the drive keeps throwing fresh ones). What
- *    works (hardware-confirmed live): pause udev's exec queue across the cold
- *    window so it cannot probe. Restored by a DETACHED child after the drive has
- *    settled, so it survives even the core-load exec (a leaked pause would wedge
- *    all hotplug until reboot). Our own eject/swap detection uses
- *    CDROM_DRIVE_STATUS, not udev, so this does not affect it.
- *
- * 2. Spin the platter up + prime the disc start, so the bios's first reads hit a
- *    warm drive. Blocks the mount path, which runs BEFORE the core is told a disc
- *    is present (no fpga read waits on us); on a warm drive it returns at once. */
+ * NB this is a mitigation, not the cold-load fix. The real cause of the cd-i
+ * cold-load choppiness was udev's blkid builtin superblock-probing the disc
+ * START (blocks 0/8/16/24/56/128) from the BOOT coldplug event, grinding 1-3s
+ * per failed cooked read against a mode-2 disc for up to udev's 180s event
+ * timeout, seesawing the head against the game's deep reads. That is fixed by
+ * the rule physcd_install_udev_rule() ships (see it for the full story) -
+ * pausing the exec queue at mount was falsified on hardware (an in-flight
+ * worker survives the pause). */
 void physcd_prewarm_blocking(void)
 {
 	if (pcd.fd < 0 || pcd.ntrk < 1 || pcd.leadout <= 0) return;
-
-	/* fire immediately at mount - "too late does nothing" once the drive settles.
-	   udevadm lives in /sbin (same as udevd) and system()'s shell PATH may not
-	   include it, which silently no-ops the pause - so set PATH explicitly. The
-	   stop's stderr + exit code go to /tmp/physcd_udev.log so a failure (e.g.
-	   udevadm not found -> rc 127) is diagnosable with one cat. 20s covers the
-	   cold spin-up window after which the drive stops emitting media-change UAs;
-	   the (sleep; start) subshell is backgrounded + reparented to init so the
-	   restore survives this process's core-load exec. */
-	int urc = system("export PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH; "
-	                 "udevadm control --stop-exec-queue 2>/tmp/physcd_udev.log");
-	{ FILE *ul = fopen("/tmp/physcd_udev.log", "a");
-	  if (ul) { fprintf(ul, "physcd: udev stop-exec-queue rc=%d\n", urc); fclose(ul); } }
-	if (urc == 0)
-		system("export PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH; "
-		       "(sleep 20; udevadm control --start-exec-queue >/dev/null 2>&1) &");
 
 	int wlba = pcd.trk[0].start;
 	double w0 = now_ms();

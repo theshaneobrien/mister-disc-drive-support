@@ -201,6 +201,11 @@ void physcd_autoboot_startup(void)
 	// runs once per process; harmless when off.
 	physcd_acoustic_config(cfg.physcd_acoustic);
 
+	// persistent udev rule so boot coldplug never blkid-grinds a cd drive
+	// (must be on disk BEFORE a boot to help that boot; installing at every
+	// start is idempotent and survives linux image updates)
+	physcd_quiet_udev();
+
 	/* NB: not gated on cfg.physcd_autoboot. autoboot=0 means "do not
 	   AUTO-load on insert", not "ignore the drive": the menu still
 	   watches so the Load Disc row can appear, and a marker written by

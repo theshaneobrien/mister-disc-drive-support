@@ -112,6 +112,12 @@ void physcd_seek_hint(int lba);
 // so its initial load and real-time fmv are not fed by a still-spinning drive.
 void physcd_prewarm_blocking(void);
 
+// startup environment fix: installs a persistent udev rules file exempting cd
+// drives from blkid superblock probing (the boot-coldplug head-seesaw behind
+// the cd-i cold-load choppiness - see install_udev_rule in the .cpp for the
+// full story). idempotent; call once per process start.
+void physcd_quiet_udev(void);
+
 // disc fingerprint for the autodetect daemon and menu display
 typedef enum {
 	PHYSCD_DISC_NONE = 0,

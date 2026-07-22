@@ -81,7 +81,9 @@ static const char *core_name_for(physcd_disc_t t)
 	case PHYSCD_DISC_PCECD:  return "TurboGrafx16";
 	case PHYSCD_DISC_NEOGEO: return "NeoGeo";
 	case PHYSCD_DISC_3DO:    return "3DO";
-	case PHYSCD_DISC_CDI:    return "CD-i";
+	// rbf basename is "CDi" (no hyphen) for findCore; the core reports "CD-i"
+	// INTERNALLY, which is what is_cdi()/core_matches compare against
+	case PHYSCD_DISC_CDI:    return "CDi";
 	// an audio cd boots a console's bios cd player - the mister as a cd
 	// player, just like the real thing. which console is configurable.
 	case PHYSCD_DISC_AUDIO:  return core_name_for(physcd_audio_console());

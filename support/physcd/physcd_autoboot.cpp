@@ -22,6 +22,8 @@
 #include "../saturn/saturn.h"
 #include "../neogeo/neogeocd.h"
 #include "../3do/3do.h"
+#include "../pcecd/pcecd.h"
+#include "../cdi/cdi.h"
 #include "mister_physcd.h"
 #include "physcd_autoboot.h"
 #include "physcd_acoustic.h"
@@ -54,6 +56,12 @@ static physcd_disc_t physcd_audio_console(void)
 	if (!strcasecmp(c, "NeoGeo") ||
 	    !strcasecmp(c, "NeoGeoCD"))      return PHYSCD_DISC_NEOGEO;
 	if (!strcasecmp(c, "3DO"))           return PHYSCD_DISC_3DO;
+	if (!strcasecmp(c, "TurboGrafx16") ||
+	    !strcasecmp(c, "PCECD") ||
+	    !strcasecmp(c, "PCE"))           return PHYSCD_DISC_PCECD;
+	if (!strcasecmp(c, "CD-i") ||
+	    !strcasecmp(c, "CDI") ||
+	    !strcasecmp(c, "CDi"))           return PHYSCD_DISC_CDI;
 	return PHYSCD_DISC_PSX;
 }
 
@@ -73,6 +81,9 @@ static const char *core_name_for(physcd_disc_t t)
 	case PHYSCD_DISC_PCECD:  return "TurboGrafx16";
 	case PHYSCD_DISC_NEOGEO: return "NeoGeo";
 	case PHYSCD_DISC_3DO:    return "3DO";
+	// rbf basename is "CDi" (no hyphen) for findCore; the core reports "CD-i"
+	// INTERNALLY, which is what is_cdi()/core_matches compare against
+	case PHYSCD_DISC_CDI:    return "CDi";
 	// an audio cd boots a console's bios cd player - the mister as a cd
 	// player, just like the real thing. which console is configurable.
 	case PHYSCD_DISC_AUDIO:  return core_name_for(physcd_audio_console());
@@ -92,6 +103,7 @@ static int core_matches(physcd_disc_t t)
 	// in cart mode; the mount enables cd mode
 	case PHYSCD_DISC_NEOGEO: return is_neogeo();
 	case PHYSCD_DISC_3DO:    return is_3do();
+	case PHYSCD_DISC_CDI:    return is_cdi();
 	case PHYSCD_DISC_AUDIO:  return core_matches(physcd_audio_console());
 	default:                 return 0;
 	}
@@ -104,7 +116,8 @@ static int mountable(physcd_disc_t t)
 {
 	return t == PHYSCD_DISC_MEGACD || t == PHYSCD_DISC_PSX
 		|| t == PHYSCD_DISC_SATURN || t == PHYSCD_DISC_NEOGEO
-		|| t == PHYSCD_DISC_3DO || t == PHYSCD_DISC_AUDIO;
+		|| t == PHYSCD_DISC_3DO || t == PHYSCD_DISC_PCECD
+		|| t == PHYSCD_DISC_CDI || t == PHYSCD_DISC_AUDIO;
 }
 
 /* resolve the rbf for a core. on the RA build, PREFER the RA-patched core
@@ -142,6 +155,10 @@ int physcd_mount_current_core(void)
 		mounted = neocd_set_image(PHYSCD_SENTINEL);
 	}
 	else if (is_3do()) mounted = p3do_set_image(0, PHYSCD_SENTINEL);
+	// pcecd_set_image is void; it sets pcecdd.loaded on a good mount
+	else if (is_pce()) { pcecd_set_image(0, PHYSCD_SENTINEL); mounted = pcecdd.loaded; }
+	// cd-i CD is disk slot 0; cdi_mount_cd now returns whether it mounted
+	else if (is_cdi()) mounted = cdi_mount_cd(0, PHYSCD_SENTINEL);
 	else recognised = 0;
 
 	if (!recognised)
@@ -183,6 +200,11 @@ void physcd_autoboot_startup(void)
 	// acoustic seek: start its background thread if the ini asks.
 	// runs once per process; harmless when off.
 	physcd_acoustic_config(cfg.physcd_acoustic);
+
+	// persistent udev rule so boot coldplug never blkid-grinds a cd drive
+	// (must be on disk BEFORE a boot to help that boot; installing at every
+	// start is idempotent and survives linux image updates)
+	physcd_quiet_udev();
 
 	/* NB: not gated on cfg.physcd_autoboot. autoboot=0 means "do not
 	   AUTO-load on insert", not "ignore the drive": the menu still
@@ -239,7 +261,17 @@ void physcd_autoboot_poll(void)
 
 	int ok = physcd_mount_current_core();
 
-	/* Info() works here: no menu is open in a freshly loaded core */
+	/* the TurboGrafx16 core raises the OSD itself when it boots with no
+	   media yet; our direct mount bypasses the file-browser path that would
+	   otherwise close it (menu.cpp IMAGE_SELECTED -> MenuHide), so the menu
+	   is left sitting over the core. close it here - gated to PCE because on
+	   the other cores the only way a menu is up at mount time is the USER
+	   opening it during the settle dwell, and closing it out from under them
+	   would be a behavior change vs the proven releases. */
+	if (is_pce() && menu_present()) MenuHide();
+
+	/* Info() works here: no menu is open in a freshly loaded core (and if
+	   the user opened one during the dwell, Info harmlessly skips) */
 	char msg[128];
 	if (ok)
 	{

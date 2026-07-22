@@ -201,6 +201,12 @@ return 0;
 
 static int tgfx16_is_cd_image(const char *path)
 {
+// a physical disc mounts under the physcd sentinel, which has no
+// extension - without this it fell into the HuCard branch, fopen failed
+// and a physical PCE-CD never hashed for RA. route it to rc_hash
+// (console 76) where the physcd cdreader intercepts, exactly like the
+// psx/megacd handlers already hash physical discs.
+if (strstr(path, "*PHYSCD*")) return 1;
 const char *ext = strrchr(path, '.');
 if (!ext) return 0;
 return (strcasecmp(ext, ".cue") == 0 ||

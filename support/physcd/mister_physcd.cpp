@@ -164,9 +164,10 @@ static struct {
 	volatile int prewarm;         /* cold-start spin-up: next lba to pre-read; -1 = idle */
 	volatile int prewarm_end;     /* stop pre-reading at this lba */
 	volatile int swap_ejected;    /* mid-swap: disc physically out, new toc not loaded yet */
+	int uncap;                    /* opt-in data-only speed uncap (physcd_speed_uncap) */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0 };
 
 /* "a swap happened during this mount" must survive the core-exit exec (the
    menu runs in a FRESH process - fpga_load_rbf execs; see physcd_autoboot.h,
@@ -201,17 +202,52 @@ static double now_ms()
 	return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
-/* linux turns Nx into kB/s (N*177) for GPCMD_SET_SPEED; 0 would mean
-   maximum. plenty of drives ignore the command entirely - best effort,
-   and re-applied per disc because a media change resets it on many. */
+/* linux turns Nx into kB/s (N*177) for GPCMD_SET_SPEED; 0 means maximum.
+   plenty of drives ignore the command entirely - best effort, and
+   re-applied per disc because a media change resets it on many.
+
+   DATA-ONLY discs run UNCAPPED (drive native speed management, i.e. CAV -
+   constant rpm): the cap puts the drive in a constant-data-rate mode where
+   a long-throw seek pays a spindle speed-match on top of the sled move,
+   and measured WARM random access was ~294ms - which loses the cd-i
+   core's hardcoded 250ms simulated-seek grace on EVERY voice-clip seek
+   (the fmv/voice "doubled syllables": the flushed core fifo starves a few
+   75Hz ticks and the CDIC replays the last audio buffer). games that
+   stream live from disc (cd-i) jump between level data and voice banks
+   half a disc apart, so long-throw latency IS the product. this drive's
+   native max is only ~4-6x anyway (comment at PHYSCD_SPEED_NX), so
+   uncapping changes the speed-management mode, not really the speed.
+   discs WITH audio tracks keep the cap: cdda is sequential (no long
+   throws to hide) and 4x keeps old/warped albums readable and the drive
+   quiet under music. */
 static void set_speed_cap()
 {
 	if (pcd.fd < 0) return;
-	if (ioctl(pcd.fd, CDROM_SELECT_SPEED, PHYSCD_SPEED_NX) < 0)
+
+	/* the uncap is OPT-IN per core (physcd_speed_uncap), not blanket: only a
+	   core that streams live and long-throws mid-stream against a hard
+	   deadline (cd-i) benefits, and the proven-at-4x cores keep their exact
+	   drive profile. even opted in, a disc WITH audio tracks stays capped. */
+	int audio = 0;
+	for (int i = 0; i < pcd.ntrk; i++)
+		if (pcd.trk[i].audio) audio = 1;
+	int nx = (pcd.uncap && pcd.ntrk > 0 && !audio) ? 0 : PHYSCD_SPEED_NX;
+
+	if (ioctl(pcd.fd, CDROM_SELECT_SPEED, nx) < 0)
 		printf("physcd: speed cap not supported, drive keeps its default\n");
+	else if (nx)
+		printf("physcd: speed capped at %dx (~%d KB/s, need 172)\n", nx, nx * 177);
 	else
-		printf("physcd: speed capped at %dx (~%d KB/s, need 172)\n",
-			PHYSCD_SPEED_NX, PHYSCD_SPEED_NX * 177);
+		printf("physcd: data-only disc - speed uncapped (native CAV, fast long seeks)\n");
+}
+
+/* opt this mount into the data-only speed uncap (see set_speed_cap). call
+   between physcd_open and physcd_load_toc; cleared by physcd_close so no
+   other core inherits it. */
+void physcd_speed_uncap(int enable)
+{
+	pcd.uncap = enable ? 1 : 0;
+	if (pcd.fd >= 0 && pcd.ntrk > 0) set_speed_cap();
 }
 
 /* defang the kernel's block-layer probing of our drive. after a media change,
@@ -232,13 +268,99 @@ static void quiet_block_probes(const char *dev)
 	name = name ? name + 1 : dev;
 
 	char path[128];
+	FILE *f;
+
+	/* kill big readahead so the kernel's probe reads are small */
 	snprintf(path, sizeof(path), "/sys/block/%s/queue/read_ahead_kb", name);
-	FILE *f = fopen(path, "w");
+	if ((f = fopen(path, "w"))) { fputs("0", f); fclose(f); }
+
+	/* stop the kernel's periodic media-change poll. on a mode-2 disc (cd-i,
+	   psx) every revalidation cooked-READ(10)s the disc, fails ASC 0x64
+	   ("illegal mode for this track"), and ties the drive up ~1s per probe -
+	   which stalls our SG_IO reads by SECONDS during heavy loading (cd-i fmv
+	   went from a 2.8s worst-miss to 0.27s hardware-confirmed). read_ahead=0
+	   alone did NOT stop these - they are explicit revalidation reads, not
+	   readahead. our own eject/swap detection uses CDROM_DRIVE_STATUS
+	   directly, not this poller, so it is unaffected. (-1 = kernel default
+	   poll on; 0 = poll off.) */
+	snprintf(path, sizeof(path), "/sys/block/%s/events_poll_msecs", name);
+	if ((f = fopen(path, "w"))) { fputs("0", f); fclose(f); }
+
+	printf("physcd: kernel disc probes quieted for %s (readahead + media-change poll off)\n", name);
+}
+
+/* startup environment fix: exempt cd drives from udev's blkid superblock
+ * probing, via a persistent rules file.
+ *
+ * THE root cause of the cd-i cold-load choppiness + fmv audio doubling
+ * (found by reading the shipped mister rootfs + the 5.15 kernel source, and
+ * consistent with every hardware falsification): 60-persistent-storage.rules
+ * runs the blkid BUILTIN inside a udevd worker for any sr* device whose
+ * media has a data track. blkid buffered-reads the superblock probe chain -
+ * blocks 0/8/16/24/56/128, exactly the dmesg spew - and on a mode-2 disc
+ * every read grinds the drive 1-3s then fails ASC 0x64. The worker runs to
+ * udev's 180s event timeout (the storm "resolving itself"), seesawing the
+ * head against the game's deep reads the whole time. The log fingerprint
+ * proves it is blkid: "async page read" only comes from the bdev pagecache
+ * path, and the kernel's own partition scan reads ONLY block 0 - blocks 8+
+ * can only be a userspace read(). Why every runtime countermeasure failed:
+ * the triggering event is the BOOT COLDPLUG (S10udev's `udevadm trigger`),
+ * which fires long before Main starts, and stop-exec-queue cannot touch an
+ * in-flight worker (falsified on hardware, cditest5/6). Only a rules file
+ * already on disk at boot prevents it.
+ *
+ * The exemption uses the escape hatch upstream provides for exactly this
+ * (60-persistent-storage.rules honors UDEV_DISABLE_PERSISTENT_STORAGE_RULES_
+ * FLAG at its top); mister's own rootfs ships a defang rule of the same
+ * class (60-jms583-phantom.rules). Nothing on mister consumes blkid's cd
+ * fingerprints - usbmount matches only sd and ub devices - so the only loss
+ * is ID_FS_* properties nobody reads. cdrom_id (SG_IO, harmless) still runs.
+ * Idempotent: rewrites only when missing/stale; the current boot's storm is
+ * already past by the time we run, so the rule pays off from the NEXT boot
+ * and for every insert/swap event from now on. */
+static void install_udev_rule(void)
+{
+	static const char *path = "/etc/udev/rules.d/59-physcd-cdrom.rules";
+	static const char *rule =
+		"# installed by physcd (MiSTer-Disc fork). stops udev's blkid builtin\n"
+		"# from superblock-probing cd drives: a mode-2 disc (cd-i, psx) rejects\n"
+		"# cooked reads, so each probe grinds the drive for seconds and fights\n"
+		"# the running game for the drive head. safe: nothing on mister mounts\n"
+		"# or fingerprints cds (usbmount matches sd*/ub* only). delete this file\n"
+		"# and physcd will reinstall it on next start; remove the physcd binary\n"
+		"# and this rule is inert but harmless.\n"
+		"ACTION!=\"remove\", KERNEL==\"sr[0-9]*\", ENV{UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG}=\"1\"\n";
+
+	/* length-aware compare: a truncating read would make strcmp never match
+	   and silently rewrite + udevadm-reload on EVERY process start. size the
+	   buffer from the rule and treat an oversized on-disk file as stale. */
+	size_t rlen = strlen(rule);
+	char cur[1024] = {};
+	FILE *f = fopen(path, "r");
 	if (f) {
-		fputs("0", f);
+		size_t got = fread(cur, 1, sizeof(cur) - 1, f);
 		fclose(f);
-		printf("physcd: block readahead off for %s (kernel disc probes fail fast now)\n", name);
+		if (got == rlen && rlen < sizeof(cur) && !memcmp(cur, rule, rlen))
+			return;   /* already installed, current text */
 	}
+
+	f = fopen(path, "w");
+	if (!f) { printf("physcd: cannot write %s\n", path); return; }
+	fputs(rule, f);
+	fflush(f);
+	fsync(fileno(f));
+	fclose(f);
+
+	/* eudev spells it --reload-rules, newer udevadm --reload; try both.
+	   PATH must be explicit - system()'s shell lacks /sbin (bit us once). */
+	system("export PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH; "
+	       "udevadm control --reload-rules 2>/dev/null || udevadm control --reload 2>/dev/null");
+	printf("physcd: installed %s (cd drives exempt from udev blkid probing from next boot)\n", path);
+}
+
+void physcd_quiet_udev(void)
+{
+	install_udev_rule();
 }
 
 // ---------------------------------------------------------------- reads
@@ -1119,6 +1241,70 @@ int physcd_current_toc(toc_t *toc)
 	return 0;
 }
 
+/* spin the platter up + prime the disc start before a core that reads the disc
+ * the instant it mounts (cd-i's bios does). Blocks the mount path, which runs
+ * BEFORE the core is told a disc is present (no fpga read waits on us); on a
+ * warm drive it returns at once.
+ *
+ * NB this is a mitigation, not the cold-load fix. The real cause of the cd-i
+ * cold-load choppiness was udev's blkid builtin superblock-probing the disc
+ * START (blocks 0/8/16/24/56/128) from the BOOT coldplug event, grinding 1-3s
+ * per failed cooked read against a mode-2 disc for up to udev's 180s event
+ * timeout, seesawing the head against the game's deep reads. That is fixed by
+ * the rule physcd_install_udev_rule() ships (see it for the full story) -
+ * pausing the exec queue at mount was falsified on hardware (an in-flight
+ * worker survives the pause). */
+void physcd_prewarm_blocking(void)
+{
+	if (pcd.fd < 0 || pcd.ntrk < 1 || pcd.leadout <= 0) return;
+
+	int wlba = pcd.trk[0].start;
+	double w0 = now_ms();
+	int warm = 0;
+
+	/* SYNC fills only - they never stamp slots on a cold NAK. loop until one
+	   burst genuinely completes: on a drive that NAKs while spinning up that
+	   means "platter now at speed", and on one that just reads slowly the
+	   first (slow) burst is itself the spin-up. */
+	while (now_ms() - w0 < 8000) {
+		if (!fill_cache(wlba, SYNC_BURST, 1)) { warm = 1; break; }
+	}
+	if (warm) {
+		/* SEEK-CALIBRATION pass. a spinning platter is only half of warm: a
+		   cold drive's first LONG-THROW seeks run ~270ms+ (servo/sled
+		   settling), and the cd-i core grants exactly 250ms of simulated
+		   seek time (its RTL kSeekTime) before it starts consuming - so the
+		   first cutscene's segment seeks each lose that race by ~20ms, the
+		   flushed 27-sector core fifo comes up empty, and the CDIC replays
+		   the last audio buffer = the fmv "doubled voices" (measured: 18
+		   misses, worst 271ms, on an otherwise perfect cold boot; the same
+		   seeks on a settled drive run tens of ms). exercise the sled
+		   across the disc NOW, before the core is told a disc exists, so
+		   its first real seeks land inside the grace window. sync fills
+		   only (they never stamp slots on failure); a failed burst still
+		   moved the head, which is the point. */
+		int span = pcd.leadout - wlba;
+		if (span > 8 * SYNC_BURST) {
+			static const int quarters[] = { 2, 3, 1 };   /* mid, outer, back in */
+			for (unsigned i = 0; i < sizeof(quarters) / sizeof(quarters[0]); i++) {
+				int slba = wlba + (int)(((int64_t)span * quarters[i]) / 4);
+				if (slba + SYNC_BURST > pcd.leadout) slba = pcd.leadout - SYNC_BURST;
+				fill_cache(slba, SYNC_BURST, 1);
+			}
+		}
+
+		/* prime a short lead at the start LAST, so any direct-mapped window
+		   collisions from the seek pass are overwritten and the lead is
+		   intact; point the data cursor here so the prefetch thread keeps
+		   pulling ahead from the disc start. */
+		for (int i = 1; i < 8; i++)
+			if (fill_cache(wlba + i * SYNC_BURST, SYNC_BURST, 1)) break;
+		pcd.cursor[0] = wlba;
+		pcd.wactive[0] = 1;
+		printf("physcd: drive spun up + seek-warmed + primed in %.0f ms\n", now_ms() - w0);
+	}
+}
+
 void physcd_seek_hint(int lba)
 {
 	if (lba < 0 || !pcd.ntrk) return;
@@ -1257,6 +1443,10 @@ physcd_disc_t physcd_identify()
 	if (!physcd_read_sector(base + 16, raw, NULL)) {
 		uint8_t *iso = raw + 16;
 		if (memcmp(iso + 1, "CD001", 5)) iso = raw + 24;   /* mode2 form1 */
+		/* cd-i (green book) uses the iso9660 volume-descriptor slot but with
+		   the "CD-I " standard identifier; mutually exclusive with CD001, so
+		   this never trips over the six CD001 console signatures below. */
+		if (!memcmp(iso + 1, "CD-I ", 5)) return PHYSCD_DISC_CDI;
 		if (!memcmp(iso + 1, "CD001", 5)) {
 			if (!memcmp(iso + 8, "PLAYSTATION", 11)) return PHYSCD_DISC_PSX;
 			if (!memcmp(iso + 8, "NGCD", 4)) return PHYSCD_DISC_NEOGEO;
@@ -1460,6 +1650,7 @@ const char *physcd_console_name(physcd_disc_t t)
 	case PHYSCD_DISC_PCECD:  return "TurboGrafx-CD";
 	case PHYSCD_DISC_NEOGEO: return "Neo Geo CD";
 	case PHYSCD_DISC_3DO:    return "3DO";
+	case PHYSCD_DISC_CDI:    return "CD-i";
 	default:                 return physcd_disc_name(t);
 	}
 }
@@ -1473,6 +1664,7 @@ const char *physcd_disc_name(physcd_disc_t t)
 	case PHYSCD_DISC_PCECD:  return "TurboGrafx CD";
 	case PHYSCD_DISC_NEOGEO: return "NeoGeo CD";
 	case PHYSCD_DISC_3DO:    return "3DO";
+	case PHYSCD_DISC_CDI:    return "CD-i";
 	case PHYSCD_DISC_AUDIO:  return "Audio CD";
 	case PHYSCD_DISC_NONE:   return "No Disc";
 	default:                 return "Unknown";
@@ -1589,5 +1781,6 @@ void physcd_close()
 	pcd.leadout = 0;
 	pcd.ntrk = 0;
 	pcd.first_data_lba = -1;
+	pcd.uncap = 0;        /* the speed uncap is per-mount opt-in, never inherited */
 	cur_dev[0] = 0;
 }

@@ -105,6 +105,27 @@ int physcd_read_data2048(int lba, uint8_t *dst);
 // of the new position immediately (call from cdd seek handling).
 void physcd_seek_hint(int lba);
 
+// spin a cold drive up to read speed and prime the start of the disc BEFORE the
+// core begins reading. blocks the caller (up to ~8s on a stone-cold drive,
+// near-instant on a warm one). call from a phys mount, after physcd_load_toc,
+// for a core that reads the disc the instant it is mounted (cd-i's bios does),
+// so its initial load and real-time fmv are not fed by a still-spinning drive.
+void physcd_prewarm_blocking(void);
+
+// startup environment fix: installs a persistent udev rules file exempting cd
+// drives from blkid superblock probing (the boot-coldplug head-seesaw behind
+// the cd-i cold-load choppiness - see install_udev_rule in the .cpp for the
+// full story). idempotent; call once per process start.
+void physcd_quiet_udev(void);
+
+// opt this mount into running the drive UNCAPPED on data-only discs (native
+// CAV speed management = fast long-throw seeks). for cores that stream live
+// and long-throw mid-stream against a hard deadline (cd-i voice clips); the
+// proven-at-4x cores keep their exact drive profile by not calling this.
+// call between physcd_open and physcd_load_toc; cleared by physcd_close.
+// discs with audio tracks stay capped even when opted in.
+void physcd_speed_uncap(int enable);
+
 // disc fingerprint for the autodetect daemon and menu display
 typedef enum {
 	PHYSCD_DISC_NONE = 0,
@@ -114,7 +135,13 @@ typedef enum {
 	PHYSCD_DISC_PCECD,
 	PHYSCD_DISC_NEOGEO,
 	PHYSCD_DISC_3DO,
+	/* new types go AFTER AUDIO: the /tmp autoboot markers persist these as
+	   raw ints across the core-exit exec, and a no-reboot binary swap would
+	   misread a shifted AUDIO (cdi was briefly inserted before it and an
+	   old marker's 7 then read as cdi = one spurious relaunch). UNKNOWN is
+	   never persisted, so appending before it is always safe. */
 	PHYSCD_DISC_AUDIO,
+	PHYSCD_DISC_CDI,
 	PHYSCD_DISC_UNKNOWN,
 } physcd_disc_t;
 

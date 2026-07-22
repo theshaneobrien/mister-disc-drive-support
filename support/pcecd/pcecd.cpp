@@ -9,6 +9,7 @@
 #include "../../spi.h"
 #include "../../hardware.h"
 #include "../../menu.h"
+#include "../physcd/mister_physcd.h"
 #include "pcecd.h"
 
 
@@ -181,7 +182,13 @@ static int load_bios(char *biosname, const char *cuename, int sgx)
 		user_io_file_tx_data((uint8_t*)buf, chunk);
 	}
 
-	FileGenerateSavePath(cuename, buf);
+	/* a physical disc has no path, and the sentinel's '*' is an illegal
+	   filename character on the fat/exfat sd card - the save mount would be
+	   created-on-write and then every write silently dropped (blank bram
+	   each session). use the fixed "physcd" stand-in like the other phys
+	   cores (megacd's physcd.sav, saturn/3do/neogeo), shared across
+	   physical discs. */
+	FileGenerateSavePath(strcmp(cuename, PHYSCD_SENTINEL) ? cuename : "physcd", buf);
 	user_io_file_mount(buf, 0, 1);
 
 	user_io_set_download(0);

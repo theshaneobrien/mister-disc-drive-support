@@ -8,6 +8,7 @@
 #include "../../user_io.h"
 
 #include "../chd/mister_chd.h"
+#include "../physcd/mister_physcd.h"
 #include "pcecd.h"
 
 #define PCECD_DATA_IO_INDEX 2
@@ -258,7 +259,19 @@ int pcecdd_t::Load(const char *filename)
 	Unload();
 
 	const char *ext = filename+strlen(filename)-4;
-	if (!strncasecmp(".cue", ext, 4))
+	if (!strcmp(filename, PHYSCD_SENTINEL))
+	{
+		/* physical usb cd: the backend builds the toc and answers sector
+		   reads off the drive; raw reads are 2352 bytes (tracks[].sector_size
+		   set by the backend). close on failure so toc.phys stays clear and
+		   Unload does not release a fd/cache we never took. */
+		if (physcd_open(NULL) || physcd_load_toc(&this->toc))
+		{
+			physcd_close();
+			printf("\x1b[32mPCECD: no readable physical disc\n\x1b[0m");
+			return -1;
+		}
+	} else if (!strncasecmp(".cue", ext, 4))
 	{
 		if (LoadCUE(filename)) return -1;
 	} else if (!strncasecmp(".chd", ext, 4)) {
@@ -280,19 +293,25 @@ int pcecdd_t::Load(const char *filename)
 		this->toc.tracks[this->toc.last].start = this->toc.end;
 		this->loaded = 1;
 
-		memcpy(subcode_name, filename, strlen(filename));
-		subcode_name[strlen(filename)] = 0x00;
-		memcpy(&subcode_name[strlen(subcode_name) - 4], ".sub", 4);
+		/* a physical disc has no side-car .sub file (the sentinel is not a
+		   path); ReadSubcode falls back to synthesized Q, same as a missing
+		   .sub. */
+		if (!this->toc.phys)
+		{
+			memcpy(subcode_name, filename, strlen(filename));
+			subcode_name[strlen(filename)] = 0x00;
+			memcpy(&subcode_name[strlen(subcode_name) - 4], ".sub", 4);
 
-		this->subcode_file = fopen(getFullPath(subcode_name), "r");
+			this->subcode_file = fopen(getFullPath(subcode_name), "r");
+
+			if (this->subcode_file != NULL) {
+				printf("\x1b[32mPCECD: SUBCODE FILE located = %s\n\x1b[0m", subcode_name);
+			} else {
+				printf("\x1b[32mPCECD: No SUBCODE file located.  Searched for '%s'.\n\x1b[0m", subcode_name);
+			}
+		}
 
 		printf("\x1b[32mPCECD: CD mounted , last track = %u\n\x1b[0m", this->toc.last);
-
-		if (this->subcode_file != NULL) {
-			printf("\x1b[32mPCECD: SUBCODE FILE located = %s\n\x1b[0m", subcode_name);
-		} else {
-			printf("\x1b[32mPCECD: No SUBCODE file located.  Searched for '%s'.\n\x1b[0m", subcode_name);
-		}
 		return 1;
 	}
 
@@ -303,7 +322,10 @@ void pcecdd_t::Unload()
 {
 	if (this->loaded)
 	{
-		if (this->toc.chd_f)
+		if (this->toc.phys)
+		{
+			physcd_close();
+		} else if (this->toc.chd_f)
 		{
 			chd_close(this->toc.chd_f);
 			this->toc.chd_f = NULL;
@@ -909,7 +931,12 @@ void pcecdd_t::ReadData(uint8_t *buf)
 {
 	if (this->toc.tracks[this->index].type && (this->lba >= 0))
 	{
-		if (this->toc.chd_f)
+		if (this->toc.phys)
+		{
+			/* backend returns the 2048 user bytes of the data sector */
+			physcd_read_data2048(this->lba, buf);
+		}
+		else if (this->toc.chd_f)
 		{
 			int s_offset = 0;
 			if (this->toc.tracks[this->index].sector_size != 2048)
@@ -936,7 +963,13 @@ int pcecdd_t::ReadCDDA(uint8_t *buf)
 	this->audioOffset = 0;// 2352;
 
 
-	if (this->toc.chd_f)
+	if (this->toc.phys)
+	{
+		/* drive returns cdda little-endian like a bin file: NO byteswap
+		   (that block is chd-only) */
+		physcd_read_sector(this->lba, buf, NULL);
+	}
+	else if (this->toc.chd_f)
 	{
 		mister_chd_read_sector(this->toc.chd_f, this->lba + this->toc.tracks[this->index].offset, 0, 0, this->audioLength, buf, this->chd_hunkbuf, &this->chd_hunknum);
 		for (int swapidx = 0; swapidx < this->audioLength; swapidx += 2)

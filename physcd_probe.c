@@ -128,6 +128,43 @@ static int read_cd_raw_sub(int fd, uint32_t lba, uint8_t *buf)
 	return 0;
 }
 
+/* READ CD with a chosen sub-channel selection in cdb[10]:
+ *   0x01 = raw interleaved P-W (bit7 P, bit6 Q, bits5-0 R..W per byte)
+ *   0x04 = corrected + de-interleaved R-W (cd+g packs, error-corrected)
+ * both append 96 bytes to the raw sector. some drives synthesize the
+ * "raw" mode from their corrected Q and never pass R-W through it, but
+ * DO serve R-W via 0x04 - this is the probe that tells the two apart. */
+static int read_cd_sub_mode(int fd, uint32_t lba, uint8_t submode, uint8_t flags, uint8_t *buf)
+{
+	uint8_t cdb[12] = { 0 };
+	uint8_t sense[32];
+	struct sg_io_hdr io;
+
+	cdb[0] = 0xBE;
+	cdb[2] = (lba >> 24) & 0xFF;
+	cdb[3] = (lba >> 16) & 0xFF;
+	cdb[4] = (lba >> 8) & 0xFF;
+	cdb[5] = lba & 0xFF;
+	cdb[8] = 1;
+	cdb[9] = flags;
+	cdb[10] = submode;
+
+	memset(&io, 0, sizeof(io));
+	io.interface_id = 'S';
+	io.cmd_len = 12;
+	io.cmdp = cdb;
+	io.dxfer_direction = SG_DXFER_FROM_DEV;
+	io.dxfer_len = RAW_SECTOR + 96;
+	io.dxferp = buf;
+	io.sbp = sense;
+	io.mx_sb_len = sizeof(sense);
+	io.timeout = 10000;
+
+	if (ioctl(fd, SG_IO, &io) < 0) return -1;
+	if (io.status || io.host_status || io.driver_status) return -2;
+	return 0;
+}
+
 struct track_info {
 	int num;
 	int is_data;
@@ -222,14 +259,84 @@ static const char *fingerprint(int fd, struct track_info *tracks, int ntracks)
 	return "unknown data disc (possibly neogeo cd or pc-fx, needs iso file listing)";
 }
 
+/* cd+g hunt: sample sectors from the audio tracks in BOTH subchannel
+ * modes, count nonzero R-W content and cd+g command packs (command
+ * symbol 9 = TV graphics, at pack offsets 0/24/48/72), and hexdump the
+ * first block that carries anything. distinguishes "drive strips R-W
+ * from the raw mode" (0x01 empty, 0x04 full) from "disc has no cd+g"
+ * (both empty) from "raw mode works" (0x01 full). */
+static void dump96(const uint8_t *sub)
+{
+	for (int i = 0; i < 96; i++)
+		printf("%02X%s", sub[i], (i % 24 == 23) ? "\n" : " ");
+}
+
+static void run_sub_test(int fd, struct track_info *tracks, int ntracks, uint32_t leadout)
+{
+	static const uint8_t modes[2] = { 0x01, 0x04 };
+	static const char *modename[2] = { "0x01 raw P-W ", "0x04 corr R-W" };
+	uint8_t buf[RAW_SECTOR + 96];
+	int dumped[2] = { 0, 0 };
+
+	printf("\ncd+g subchannel hunt (8 sectors x 2 spots per audio track):\n");
+
+	for (int t = 0; t < ntracks && t < 8; t++) {
+		if (tracks[t].is_data) continue;
+		uint32_t start = tracks[t].start_lba;
+		uint32_t end = (t + 1 < ntracks) ? tracks[t + 1].start_lba : leadout;
+		if (end <= start + 300) continue;
+
+		/* two spots: 3s in, and a third of the way through the track */
+		uint32_t spots[2] = { start + 225, start + (end - start) / 3 };
+
+		for (int m = 0; m < 2; m++) {
+			int rej = 0, got = 0, rw = 0, packs = 0;
+			for (int s = 0; s < 2; s++) {
+				for (uint32_t lba = spots[s]; lba < spots[s] + 8 && lba < end; lba++) {
+					int r = read_cd_sub_mode(fd, lba, modes[m], 0xF8, buf);
+					if (r) r = read_cd_sub_mode(fd, lba, modes[m], 0x10, buf);
+					if (r) { rej++; continue; }
+					got++;
+
+					const uint8_t *sub = buf + RAW_SECTOR;
+					int nz = 0;
+					for (int i = 0; i < 96; i++)
+						if (sub[i] & 0x3F) nz++;   /* R-W bits only in either mode */
+					rw += nz;
+					for (int p = 0; p < 96; p += 24)
+						if ((sub[p] & 0x3F) == 9) packs++;
+
+					if (nz && !dumped[m]) {
+						dumped[m] = 1;
+						printf("  first non-empty %s block (track %02d lba %u):\n",
+							modename[m], tracks[t].num, lba);
+						dump96(sub);
+					}
+				}
+			}
+			printf("  track %02d %s: ", tracks[t].num, modename[m]);
+			if (!got) printf("all %d reads rejected\n", rej);
+			else printf("%2d sectors, rw bytes %4d/%d, cd+g packs %2d/%d%s\n",
+				got, rw, got * 96, packs, got * 4, rej ? " (some rejected)" : "");
+		}
+	}
+
+	printf("\nverdict guide: packs high in one mode = cd+g disc, use that mode.\n"
+	       "both zero on a known cd+g disc = this drive never returns R-W.\n");
+}
+
 int main(int argc, char **argv)
 {
-	const char *dev = (argc > 1) ? argv[1] : "/dev/sr0";
-	/* optional 2nd arg: speed cap in Nx (0 = drive maximum). the
-	 * backend caps at 4x because rpm is what makes marginal media read
-	 * badly - run the probe at a few values on a troublesome disc to
-	 * see the throughput/seek tradeoff for yourself. */
-	int speed = (argc > 2) ? atoi(argv[2]) : -1;
+	const char *dev = "/dev/sr0";
+	int speed = -1, subtest = 0;
+
+	/* args in any order: a /dev path, a numeric speed cap in Nx
+	 * (0 = drive maximum), and/or "sub" for the cd+g subchannel hunt */
+	for (int i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "sub")) subtest = 1;
+		else if (argv[i][0] == '/') dev = argv[i];
+		else speed = atoi(argv[i]);
+	}
 
 	int fd = open(dev, O_RDONLY | O_NONBLOCK);
 	if (fd < 0) { perror(dev); return 1; }
@@ -281,6 +388,11 @@ int main(int argc, char **argv)
 			(unsigned)((uint64_t)lead.cdte_addr.lba * RAW_SECTOR / (1024 * 1024)));
 
 	printf("\ndisc type: %s\n", fingerprint(fd, tracks, ntracks));
+
+	if (subtest) {
+		run_sub_test(fd, tracks, ntracks, lead.cdte_addr.lba);
+		return 0;
+	}
 
 	/* region, for sega discs that carry a mega drive style header */
 	for (int i = 0; i < ntracks; i++) {

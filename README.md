@@ -79,6 +79,16 @@ echo mount_phys > /dev/MiSTer_cmd
 
 That mounts the drive into whatever CD core is already running.
 
+Cores I've tested with:
+* 3DO_20260717.rbf
+* CDi_20260502.rbf
+* MegaCD_20260603.rbf
+* NeoGeo_20260603.rbf
+* PSX_20260411.rbf
+* Saturn_20251003.rbf
+* TurboGrafx16_20260603.rbf
+* All current RA Cores
+
 ## Disc swapping
 
 Multi disc games work with real discs. On PlayStation you play until the game asks for the next disc, eject, put the next one in, and the game carries on by itself. Tested with Final Fantasy VII on retail discs, it just notices, no buttons, no menus.

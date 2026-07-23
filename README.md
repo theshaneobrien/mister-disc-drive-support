@@ -11,6 +11,8 @@ This is a fork of Main_MiSTer, the ARM/Linux side of MiSTer. All the work is in 
 * Vib Ribbon with your own music. Boot the game, swap in any album off your shelf. ([Video](https://youtu.be/msHR5iKsleY))
 * Audio CDs. Put a music disc in and the MiSTer boots a console's built in CD player. Swap albums whenever. Choose your default console as a player. ([Video](https://youtu.be/r3Z2uLo_iXA))
 * Video CDs. Pop a VCD in and it plays through the CD-i core, which turns out to emulate the CD-i digital video hardware. The MiSTer as a Video CD player.
+* Karaoke. A CD+G disc draws its lyrics and the colour highlight in time with the music, through the Mega CD or PC Engine, straight off the disc. Your MiSTer does karaoke now.
+* CD-i disc swapping. Multi disc CD-i titles and two disc Video CD movies swap disc 1 for disc 2 mid play, no reset.
 * The disc is detected automatically and the right core loads.
 * Autoboot when you drop a disc in, or a manual Play row in the menu.
 * RetroAchievements earned straight off the physical disc, on the RA build (Really depends on your disc and supported hashes).
@@ -111,6 +113,12 @@ The MiSTer is now a CD player. Put a music CD in at the menu and it boots into a
 
 Swap albums live and the player picks up the new disc and its track list. The start of an audio disc is buffered while the drive spins up, so track one comes in clean.
 
+## Karaoke (CD+G)
+
+A CD+G disc is an ordinary music CD with karaoke graphics hidden in its subchannel. Drop one in and it boots the Mega CD player by default, which reads those graphics off the disc and draws the lyrics with the colour highlight sweeping along in time with the song. Set PHYSCD_CDG_CORE=TurboGrafx16 for the PC Engine player instead. Both need their core (and BIOS) installed, same as playing a game on them.
+
+The Philips CD-i played CD+G too, and the fork feeds it the same data, but the released CD-i core does not draw it yet (the support is in the CD-i source, just not in a built core as of writing). A newer CD-i core will light it up with no change here.
+
 ## Settings
 
 In MiSTer.ini, in their own [physcd] section:
@@ -123,6 +131,7 @@ PHYSCD_DEVICE=        ; optional, pin one drive such as /dev/sr1, blank means au
 PHYSCD_ACOUSTIC=0     ; 1 = a spare disc in the drive spins and seeks along with image games, see below
 PHYSCD_AUDIO_CORE=PSX ; which console's CD player an audio disc boots: PSX, MegaCD, Saturn, NeoGeo, or TurboGrafx16
 PHYSCD_VCD_CORE=CDI   ; which core a Video CD boots: CDI plays them, others are there to experiment with
+PHYSCD_CDG_CORE=MegaCD ; which core a CD+G karaoke disc boots: MegaCD or TurboGrafx16 draw the graphics
 ```
 
 They also work under [MiSTer], but keeping them in their own section means any other MiSTer binary on your card (like MiSTer Companion's MiSTer_RA) skips them quietly instead of popping unknown option warnings at boot.

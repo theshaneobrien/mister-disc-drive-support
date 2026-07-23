@@ -142,6 +142,7 @@ typedef enum {
 	   never persisted, so appending before it is always safe. */
 	PHYSCD_DISC_AUDIO,
 	PHYSCD_DISC_CDI,
+	PHYSCD_DISC_VCD,     /* video cd / cd-bridge; boots the PHYSCD_VCD_CORE core (default CD-i) */
 	PHYSCD_DISC_UNKNOWN,
 } physcd_disc_t;
 

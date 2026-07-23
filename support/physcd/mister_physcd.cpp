@@ -1457,6 +1457,16 @@ physcd_disc_t physcd_identify()
 		if (!memcmp(iso + 1, "CD001", 5)) {
 			if (!memcmp(iso + 8, "PLAYSTATION", 11)) return PHYSCD_DISC_PSX;
 			if (!memcmp(iso + 8, "NGCD", 4)) return PHYSCD_DISC_NEOGEO;
+			/* video cd / super vcd / photo cd / cd-i digital video are all
+			   CD-BRIDGE discs (white book): a "CD001" iso volume whose SYSTEM
+			   identifier (same field psx stamps "PLAYSTATION" in) is
+			   "CD-RTOS CD-BRIDGE", and which carry a /CDI application on the
+			   disc that a cd-i player auto-runs. so boot the cd-i core and let
+			   the disc's own app drive it. whether it actually plays depends on
+			   the core emulating the cd-i digital-video (mpeg) hardware -
+			   experimental. cd-i GAME discs use the "CD-I " standard id caught
+			   above, so this never collides with them. */
+			if (!memcmp(iso + 8, "CD-RTOS CD-BRIDGE", 17)) return PHYSCD_DISC_VCD;
 		}
 	}
 
@@ -1658,6 +1668,7 @@ const char *physcd_console_name(physcd_disc_t t)
 	case PHYSCD_DISC_NEOGEO: return "Neo Geo CD";
 	case PHYSCD_DISC_3DO:    return "3DO";
 	case PHYSCD_DISC_CDI:    return "CD-i";
+	case PHYSCD_DISC_VCD:    return "Video CD";
 	default:                 return physcd_disc_name(t);
 	}
 }
@@ -1672,6 +1683,7 @@ const char *physcd_disc_name(physcd_disc_t t)
 	case PHYSCD_DISC_NEOGEO: return "NeoGeo CD";
 	case PHYSCD_DISC_3DO:    return "3DO";
 	case PHYSCD_DISC_CDI:    return "CD-i";
+	case PHYSCD_DISC_VCD:    return "Video CD";
 	case PHYSCD_DISC_AUDIO:  return "Audio CD";
 	case PHYSCD_DISC_NONE:   return "No Disc";
 	default:                 return "Unknown";

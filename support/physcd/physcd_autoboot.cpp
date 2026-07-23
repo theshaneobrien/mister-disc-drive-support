@@ -65,6 +65,32 @@ static physcd_disc_t physcd_audio_console(void)
 	return PHYSCD_DISC_PSX;
 }
 
+/* which core a Video CD (CD-Bridge disc) boots into. PHYSCD_VCD_CORE,
+   default CD-i - the stock CDi core emulates the cd-i digital-video (mpeg)
+   hardware and plays them (hardware-confirmed). overridable so people can
+   point a vcd at another core to experiment (a real saturn/3do/cd32 played
+   vcds too, but only with an mpeg add-on those cores do not model). the
+   resolved value must be a mountable console; an unknown value falls back
+   to CD-i. shares the audio-core name spellings. */
+static physcd_disc_t physcd_vcd_console(void)
+{
+	const char *c = cfg.physcd_vcd_core;
+	if (!c || !*c)                       return PHYSCD_DISC_CDI;
+	if (!strcasecmp(c, "CD-i") ||
+	    !strcasecmp(c, "CDI") ||
+	    !strcasecmp(c, "CDi"))           return PHYSCD_DISC_CDI;
+	if (!strcasecmp(c, "MegaCD"))        return PHYSCD_DISC_MEGACD;
+	if (!strcasecmp(c, "Saturn"))        return PHYSCD_DISC_SATURN;
+	if (!strcasecmp(c, "PSX"))           return PHYSCD_DISC_PSX;
+	if (!strcasecmp(c, "NeoGeo") ||
+	    !strcasecmp(c, "NeoGeoCD"))      return PHYSCD_DISC_NEOGEO;
+	if (!strcasecmp(c, "3DO"))           return PHYSCD_DISC_3DO;
+	if (!strcasecmp(c, "TurboGrafx16") ||
+	    !strcasecmp(c, "PCECD") ||
+	    !strcasecmp(c, "PCE"))           return PHYSCD_DISC_PCECD;
+	return PHYSCD_DISC_CDI;
+}
+
 /*
  * disc type -> core name for findCore.
  *
@@ -87,6 +113,9 @@ static const char *core_name_for(physcd_disc_t t)
 	// an audio cd boots a console's bios cd player - the mister as a cd
 	// player, just like the real thing. which console is configurable.
 	case PHYSCD_DISC_AUDIO:  return core_name_for(physcd_audio_console());
+	// a video cd boots the core that can play it (CD-i by default,
+	// configurable via PHYSCD_VCD_CORE)
+	case PHYSCD_DISC_VCD:    return core_name_for(physcd_vcd_console());
 	default:                 return NULL;
 	}
 }
@@ -105,6 +134,7 @@ static int core_matches(physcd_disc_t t)
 	case PHYSCD_DISC_3DO:    return is_3do();
 	case PHYSCD_DISC_CDI:    return is_cdi();
 	case PHYSCD_DISC_AUDIO:  return core_matches(physcd_audio_console());
+	case PHYSCD_DISC_VCD:    return core_matches(physcd_vcd_console());
 	default:                 return 0;
 	}
 }
@@ -117,7 +147,8 @@ static int mountable(physcd_disc_t t)
 	return t == PHYSCD_DISC_MEGACD || t == PHYSCD_DISC_PSX
 		|| t == PHYSCD_DISC_SATURN || t == PHYSCD_DISC_NEOGEO
 		|| t == PHYSCD_DISC_3DO || t == PHYSCD_DISC_PCECD
-		|| t == PHYSCD_DISC_CDI || t == PHYSCD_DISC_AUDIO;
+		|| t == PHYSCD_DISC_CDI || t == PHYSCD_DISC_AUDIO
+		|| t == PHYSCD_DISC_VCD;
 }
 
 /* resolve the rbf for a core. on the RA build, PREFER the RA-patched core

@@ -42,17 +42,15 @@ extern const char *getRootDir();
 static unsigned long pending_mount = 0;
 static physcd_disc_t pending_type = PHYSCD_DISC_NONE;
 
-/* which console's bios cd player an audio cd boots into. PHYSCD_AUDIO_CORE
-   (default PSX) lets people pick - PSX is the verified one (its bios cd
-   player is confirmed working); the others are plumbed but their bios cd
-   player is a hardware-verify. only mountable cd consoles are offered; an
-   unknown value falls back to PSX. */
-static physcd_disc_t physcd_audio_console(void)
+/* shared PHYSCD_*_CORE ini-value parser: which mountable console a
+   config string names. an empty or unknown value falls back to dflt. */
+static physcd_disc_t parse_console(const char *c, physcd_disc_t dflt)
 {
-	const char *c = cfg.physcd_audio_core;
-	if (!c || !*c)                       return PHYSCD_DISC_PSX;
+	if (!c || !*c)                       return dflt;
 	if (!strcasecmp(c, "MegaCD"))        return PHYSCD_DISC_MEGACD;
 	if (!strcasecmp(c, "Saturn"))        return PHYSCD_DISC_SATURN;
+	if (!strcasecmp(c, "PSX") ||
+	    !strcasecmp(c, "PlayStation"))   return PHYSCD_DISC_PSX;
 	if (!strcasecmp(c, "NeoGeo") ||
 	    !strcasecmp(c, "NeoGeoCD"))      return PHYSCD_DISC_NEOGEO;
 	if (!strcasecmp(c, "3DO"))           return PHYSCD_DISC_3DO;
@@ -62,33 +60,37 @@ static physcd_disc_t physcd_audio_console(void)
 	if (!strcasecmp(c, "CD-i") ||
 	    !strcasecmp(c, "CDI") ||
 	    !strcasecmp(c, "CDi"))           return PHYSCD_DISC_CDI;
-	return PHYSCD_DISC_PSX;
+	return dflt;
+}
+
+/* which console's bios cd player an audio cd boots into. PHYSCD_AUDIO_CORE
+   (default PSX) lets people pick - PSX is the verified one (its bios cd
+   player is confirmed working); the others are plumbed but their bios cd
+   player is a hardware-verify. */
+static physcd_disc_t physcd_audio_console(void)
+{
+	return parse_console(cfg.physcd_audio_core, PHYSCD_DISC_PSX);
 }
 
 /* which core a Video CD (CD-Bridge disc) boots into. PHYSCD_VCD_CORE,
    default CD-i - the stock CDi core emulates the cd-i digital-video (mpeg)
    hardware and plays them (hardware-confirmed). overridable so people can
    point a vcd at another core to experiment (a real saturn/3do/cd32 played
-   vcds too, but only with an mpeg add-on those cores do not model). the
-   resolved value must be a mountable console; an unknown value falls back
-   to CD-i. shares the audio-core name spellings. */
+   vcds too, but only with an mpeg add-on those cores do not model). */
 static physcd_disc_t physcd_vcd_console(void)
 {
-	const char *c = cfg.physcd_vcd_core;
-	if (!c || !*c)                       return PHYSCD_DISC_CDI;
-	if (!strcasecmp(c, "CD-i") ||
-	    !strcasecmp(c, "CDI") ||
-	    !strcasecmp(c, "CDi"))           return PHYSCD_DISC_CDI;
-	if (!strcasecmp(c, "MegaCD"))        return PHYSCD_DISC_MEGACD;
-	if (!strcasecmp(c, "Saturn"))        return PHYSCD_DISC_SATURN;
-	if (!strcasecmp(c, "PSX"))           return PHYSCD_DISC_PSX;
-	if (!strcasecmp(c, "NeoGeo") ||
-	    !strcasecmp(c, "NeoGeoCD"))      return PHYSCD_DISC_NEOGEO;
-	if (!strcasecmp(c, "3DO"))           return PHYSCD_DISC_3DO;
-	if (!strcasecmp(c, "TurboGrafx16") ||
-	    !strcasecmp(c, "PCECD") ||
-	    !strcasecmp(c, "PCE"))           return PHYSCD_DISC_PCECD;
-	return PHYSCD_DISC_CDI;
+	return parse_console(cfg.physcd_vcd_core, PHYSCD_DISC_CDI);
+}
+
+/* which core a cd+g disc (audio cd with karaoke graphics in the R-W
+   subchannel) boots into. PHYSCD_CDG_CORE, default CD-i - its CDIC
+   decodes the subchannel and its cd player draws the graphics; every
+   other console just plays it as a plain audio cd. set it to your
+   PHYSCD_AUDIO_CORE value if you would rather cd+g discs behave like
+   any other audio cd. */
+static physcd_disc_t physcd_cdg_console(void)
+{
+	return parse_console(cfg.physcd_cdg_core, PHYSCD_DISC_CDI);
 }
 
 /*
@@ -116,6 +118,9 @@ static const char *core_name_for(physcd_disc_t t)
 	// a video cd boots the core that can play it (CD-i by default,
 	// configurable via PHYSCD_VCD_CORE)
 	case PHYSCD_DISC_VCD:    return core_name_for(physcd_vcd_console());
+	// a cd+g karaoke disc boots the core that draws the graphics
+	// (CD-i by default, configurable via PHYSCD_CDG_CORE)
+	case PHYSCD_DISC_CDG:    return core_name_for(physcd_cdg_console());
 	default:                 return NULL;
 	}
 }
@@ -135,6 +140,7 @@ static int core_matches(physcd_disc_t t)
 	case PHYSCD_DISC_CDI:    return is_cdi();
 	case PHYSCD_DISC_AUDIO:  return core_matches(physcd_audio_console());
 	case PHYSCD_DISC_VCD:    return core_matches(physcd_vcd_console());
+	case PHYSCD_DISC_CDG:    return core_matches(physcd_cdg_console());
 	default:                 return 0;
 	}
 }
@@ -148,7 +154,7 @@ static int mountable(physcd_disc_t t)
 		|| t == PHYSCD_DISC_SATURN || t == PHYSCD_DISC_NEOGEO
 		|| t == PHYSCD_DISC_3DO || t == PHYSCD_DISC_PCECD
 		|| t == PHYSCD_DISC_CDI || t == PHYSCD_DISC_AUDIO
-		|| t == PHYSCD_DISC_VCD;
+		|| t == PHYSCD_DISC_VCD || t == PHYSCD_DISC_CDG;
 }
 
 /* resolve the rbf for a core. on the RA build, PREFER the RA-patched core
@@ -398,6 +404,7 @@ int physcd_menu_row(char *out, int outsz)
 			int generic = !strcasecmp(title, physcd_console_name(t))
 				|| !strcasecmp(title, physcd_disc_name(t));
 			if (t == PHYSCD_DISC_AUDIO)  snprintf(out, outsz, "Play Audio CD");
+			else if (t == PHYSCD_DISC_CDG) snprintf(out, outsz, "Play CD+G");
 			else if (*title && !generic) snprintf(out, outsz, "Play: %s - %s", title, physcd_console_name(t));
 			else                         snprintf(out, outsz, "Play %s Disc", physcd_console_name(t));
 			return 1;

@@ -1429,8 +1429,7 @@ int physcd_read_data2048(int lba, uint8_t *dst)
    packs, and a pack whose command symbol is 9 ("TV graphics") is cd+g.
    the subchannel comes off the disc raw and uncorrected, so a stray
    bit flip can fake a lone 9 - require a pile of hits before believing
-   it. samples a few seconds into each of the first two tracks (some
-   karaoke discs open with a graphics-less intro track). */
+   it. */
 static int probe_cdg(void)
 {
 	/* decision log for hardware diagnosis: /tmp/physcd_cdg.log says
@@ -1459,45 +1458,50 @@ static int probe_cdg(void)
 	uint8_t raw[PHYSCD_RAW], sub[PHYSCD_SUB];
 	int hits = 0, dumped = 0;
 
-	for (int t = 0; t < 2 && t < pcd.ntrk; t++) {
-		if (!pcd.trk[t].audio) continue;
-		int lba = pcd.trk[t].start + 3 * 75;        /* 3s in */
-		int end = lba + 40;
-		if (end > pcd.trk[t].end) end = pcd.trk[t].end;
-		int withsub = 0, nosub = 0, badread = 0, thits = 0;
-		for (; lba < end; lba++) {
-			if (!physcd_read_sector_sub(lba, raw, sub)) {
+	/* sample windows spread across the WHOLE program area, not the head
+	   of the first tracks: discs put packs where the lyrics are, not at
+	   track starts (hardware showed a karaoke disc with track 1 empty
+	   everywhere and track 2 empty until a third of the way in). early
+	   exit once the disc has proven itself. */
+	enum { CDG_WINDOWS = 10, CDG_WSEC = 20, CDG_NEED = 6 };
+	int lo = pcd.trk[0].start + 150;
+	int hi = pcd.leadout - 150;
+	if (hi <= lo) { if (lf) { fprintf(lf, "verdict: disc too short\n"); fclose(lf); } return 0; }
+
+	for (int w = 0; w < CDG_WINDOWS && hits < CDG_NEED; w++) {
+		int base = lo + (int)(((int64_t)(hi - lo) * w) / CDG_WINDOWS);
+		int withsub = 0, nosub = 0, badread = 0, whits = 0;
+		for (int s = 0; s < CDG_WSEC && base + s < hi; s++) {
+			if (!physcd_read_sector_sub(base + s, raw, sub)) {
 				/* split "no subchannel" from "sector unreadable" -
 				   the re-read is a cache hit, effectively free */
-				if (!physcd_read_sector(lba, raw, NULL)) nosub++;
+				if (!physcd_read_sector(base + s, raw, NULL)) nosub++;
 				else badread++;
 				continue;
 			}
 			withsub++;
-			if (lf && !dumped) {
+			for (int p = 0; p < PHYSCD_SUB; p += 24)
+				if ((sub[p] & 0x3F) == 9) whits++;
+			if (lf && whits && !dumped) {
 				dumped = 1;
-				fprintf(lf, "first sub block (lba %d), raw 96:\n", lba);
+				fprintf(lf, "first cd+g sub block (lba %d), raw 96:\n", base + s);
 				for (int i = 0; i < PHYSCD_SUB; i++)
 					fprintf(lf, "%02X%s", sub[i], (i % 24 == 23) ? "\n" : " ");
-				fprintf(lf, "pack cmds (&3F at 0/24/48/72): %02X %02X %02X %02X\n",
-				        sub[0] & 0x3F, sub[24] & 0x3F, sub[48] & 0x3F, sub[72] & 0x3F);
 			}
-			for (int p = 0; p < PHYSCD_SUB; p += 24)
-				if ((sub[p] & 0x3F) == 9) thits++;
 		}
-		hits += thits;
-		if (lf) fprintf(lf, "track %d window: %d with sub, %d without, %d unreadable, %d cd+g packs\n",
-		                t + 1, withsub, nosub, badread, thits);
+		hits += whits;
+		if (lf) fprintf(lf, "window %d @%d: %d with sub, %d without, %d unreadable, %d cd+g packs\n",
+		                w, base, withsub, nosub, badread, whits);
 	}
 
 	if (lf) {
 		/* sub_ok flipping 1 -> 0 mid-sample = the burst fallback fired
 		   (drive rejects multi-sector subchannel reads) */
 		fprintf(lf, "sub_ok after sampling: %d\n", pcd.sub_ok);
-		fprintf(lf, "verdict: %d packs -> %s\n", hits, hits >= 8 ? "CD+G" : "Audio CD");
+		fprintf(lf, "verdict: %d packs -> %s\n", hits, hits >= CDG_NEED ? "CD+G" : "Audio CD");
 		fclose(lf);
 	}
-	return hits >= 8;
+	return hits >= CDG_NEED;
 }
 
 physcd_disc_t physcd_identify()

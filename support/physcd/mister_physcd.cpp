@@ -1433,6 +1433,13 @@ int physcd_read_data2048(int lba, uint8_t *dst)
    karaoke discs open with a graphics-less intro track). */
 static int probe_cdg(void)
 {
+	/* decision log for hardware diagnosis: /tmp/physcd_cdg.log says
+	   whether the drive gave subchannel at all, what the raw bytes
+	   look like (interleaved vs some drive-specific layout), and how
+	   many cd+g command packs were seen. */
+	FILE *lf = fopen("/tmp/physcd_cdg.log", "w");
+	int sub_at_toc = pcd.sub_ok;
+
 	/* the toc-time subchannel probe can come back inconclusive (-1,
 	   "couldn't tell, retry later") and nothing else ever retries it -
 	   without this a cd+g disc identified in that state is stuck as
@@ -1441,23 +1448,56 @@ static int probe_cdg(void)
 	if (pcd.sub_ok < 0 && pcd.ntrk > 0 && pcd.trk[0].audio)
 		probe_subchannel(pcd.trk[0].start + 3 * 75);
 
-	if (pcd.sub_ok != 1) return 0;     /* drive gives no subchannel */
+	if (lf) fprintf(lf, "sub_ok: %d at toc, %d after retry\n",
+	                sub_at_toc, pcd.sub_ok);
+
+	if (pcd.sub_ok != 1) {             /* drive gives no subchannel */
+		if (lf) { fprintf(lf, "verdict: no subchannel -> Audio CD\n"); fclose(lf); }
+		return 0;
+	}
 
 	uint8_t raw[PHYSCD_RAW], sub[PHYSCD_SUB];
-	int hits = 0;
+	int hits = 0, dumped = 0;
 
 	for (int t = 0; t < 2 && t < pcd.ntrk; t++) {
 		if (!pcd.trk[t].audio) continue;
 		int lba = pcd.trk[t].start + 3 * 75;        /* 3s in */
 		int end = lba + 40;
 		if (end > pcd.trk[t].end) end = pcd.trk[t].end;
+		int withsub = 0, nosub = 0, badread = 0, thits = 0;
 		for (; lba < end; lba++) {
-			if (!physcd_read_sector_sub(lba, raw, sub)) continue;
+			if (!physcd_read_sector_sub(lba, raw, sub)) {
+				/* split "no subchannel" from "sector unreadable" -
+				   the re-read is a cache hit, effectively free */
+				if (!physcd_read_sector(lba, raw, NULL)) nosub++;
+				else badread++;
+				continue;
+			}
+			withsub++;
+			if (lf && !dumped) {
+				dumped = 1;
+				fprintf(lf, "first sub block (lba %d), raw 96:\n", lba);
+				for (int i = 0; i < PHYSCD_SUB; i++)
+					fprintf(lf, "%02X%s", sub[i], (i % 24 == 23) ? "\n" : " ");
+				fprintf(lf, "pack cmds (&3F at 0/24/48/72): %02X %02X %02X %02X\n",
+				        sub[0] & 0x3F, sub[24] & 0x3F, sub[48] & 0x3F, sub[72] & 0x3F);
+			}
 			for (int p = 0; p < PHYSCD_SUB; p += 24)
-				if ((sub[p] & 0x3F) == 9 && ++hits >= 8) return 1;
+				if ((sub[p] & 0x3F) == 9) thits++;
 		}
+		hits += thits;
+		if (lf) fprintf(lf, "track %d window: %d with sub, %d without, %d unreadable, %d cd+g packs\n",
+		                t + 1, withsub, nosub, badread, thits);
 	}
-	return 0;
+
+	if (lf) {
+		/* sub_ok flipping 1 -> 0 mid-sample = the burst fallback fired
+		   (drive rejects multi-sector subchannel reads) */
+		fprintf(lf, "sub_ok after sampling: %d\n", pcd.sub_ok);
+		fprintf(lf, "verdict: %d packs -> %s\n", hits, hits >= 8 ? "CD+G" : "Audio CD");
+		fclose(lf);
+	}
+	return hits >= 8;
 }
 
 physcd_disc_t physcd_identify()

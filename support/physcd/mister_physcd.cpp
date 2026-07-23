@@ -165,9 +165,18 @@ static struct {
 	volatile int prewarm_end;     /* stop pre-reading at this lba */
 	volatile int swap_ejected;    /* mid-swap: disc physically out, new toc not loaded yet */
 	int uncap;                    /* opt-in data-only speed uncap (physcd_speed_uncap) */
+	/* edc integrity stats (stats-only, see the edc section). same
+	   convention as st_hit/st_bad: plain counters, telemetry noise from
+	   the rare cross-thread race is accepted. */
+	uint32_t st_edc_checked;      /* data sectors whose edc was actually verified */
+	uint32_t st_edc_bad;          /* ...that failed: the drive delivered a misread */
+	uint32_t st_form_bad;         /* malformed structure (sync/mode/subheader) */
+	uint32_t st_edc_logged;       /* log cap, mirrors st_bad_logged */
+	int st_edc_last_lba;          /* -1 = none */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
-	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0 };
+	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0,
+	  0, 0, 0, 0, -1 };
 
 /* "a swap happened during this mount" must survive the core-exit exec (the
    menu runs in a FRESH process - fpga_load_rbf execs; see physcd_autoboot.h,
@@ -430,6 +439,133 @@ static int cooked_read_raw(int lba, uint8_t *dst)
 // bursts are clamped at track boundaries so one transaction never
 // mixes data and cd-da. degrades to single-sector retries, then the
 // cooked path, so one bad sector doesn't poison the whole burst.
+/* ------------------------------------------------------------------ edc
+ *
+ * error detection code of cd-rom data sectors, clean-room from ECMA-130
+ * (2nd ed.) section 14.3: a 32-bit crc over the sector with generator
+ * P(x) = (x^16+x^15+x^2+1)(x^16+x^2+x+1) = 0x8001801B, "least significant
+ * bit of a data byte is used first" = a REFLECTED crc, so the table is
+ * built against the bit-reversed constant 0xD8018001. seed 0, no final
+ * xor, stored little-endian at the per-mode edc offset.
+ *
+ * coverage (cross-checked against ECMA-130 + public tooling docs):
+ *   mode 1:        edc at 2064 over bytes 0..2063 (sync+header INcluded)
+ *   mode 2 form 1: edc at 2072 over bytes 16..2071 (sync+header EXcluded)
+ *   mode 2 form 2: edc at 2348 over bytes 16..2347, OPTIONAL - an all-zero
+ *                  field means "not computed" and cannot be judged
+ *
+ * STATS-ONLY groundwork: sectors are counted, never rejected - the read
+ * path behaves byte-identically to v0.4.0. enforcement (retry-on-bad) is
+ * a separate future decision, made after these counters have described
+ * what real discs look like. audio sectors carry no edc and are skipped
+ * by the callers (track type gates the call). */
+static uint32_t edc_lut[256];
+static int edc_on = 0;                /* armed only if the self-test passes */
+
+static void edc_init(void)
+{
+	static int done = 0;
+	if (done) return;
+	done = 1;
+
+	for (uint32_t i = 0; i < 256; i++) {
+		uint32_t e = i;
+		for (int j = 0; j < 8; j++)
+			e = (e >> 1) ^ ((e & 1) ? 0xD8018001u : 0);
+		edc_lut[i] = e;
+	}
+
+	/* self-test vector: sync + header (msf 00:02:00, mode 1). the expected
+	   crc 0x91FE029E was verified THREE independent ways against this exact
+	   algorithm: a table-driven reproduction (lut[1]=0x90910101 matches the
+	   canonical cd-rom edc table), a from-scratch bit-by-bit reflected crc,
+	   and the append-edc-yields-zero property (appending 0x91FE029E LE and
+	   re-checksumming gives 0, which only the true crc of the vector can do).
+	   a bit-order/constant/table mistake in the build above cannot pass this.
+	   on failure the whole feature disarms - stats must never affect reads. */
+	static const uint8_t tv[16] = { 0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+	                                0xFF,0xFF,0xFF,0x00,0x00,0x02,0x00,0x01 };
+	uint32_t e = 0;
+	for (int i = 0; i < 16; i++) e = (e >> 8) ^ edc_lut[(e ^ tv[i]) & 0xFF];
+	edc_on = (e == 0x91FE029Eu);
+	printf(edc_on ? "physcd: edc self-test ok\n"
+	              : "physcd: edc self-test FAILED - integrity stats disabled\n");
+}
+
+static uint32_t edc_compute(const uint8_t *p, int len)
+{
+	uint32_t e = 0;
+	while (len--) e = (e >> 8) ^ edc_lut[(e ^ *p++) & 0xFF];
+	return e;
+}
+
+static uint32_t edc_stored(const uint8_t *p)      /* little-endian on disc */
+{
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static const uint8_t edc_sync[12] = { 0x00,0xFF,0xFF,0xFF,0xFF,0xFF,
+                                      0xFF,0xFF,0xFF,0xFF,0xFF,0x00 };
+
+static void edc_check_sector(const uint8_t *sec, int lba)
+{
+	if (!edc_on) return;
+
+	/* structure first: without a sane sync pattern + mode byte the layout
+	   cannot be trusted, so no edc verdict either way */
+	if (memcmp(sec, edc_sync, 12) || sec[15] > 2) {
+		pcd.st_form_bad++;
+		if (pcd.st_edc_logged < 8) {
+			pcd.st_edc_logged++;
+			printf("physcd: malformed data sector lba=%d (mode %02x)%s\n",
+				lba, sec[15],
+				pcd.st_edc_logged == 8 ? " (further ones counted silently)" : "");
+		}
+		return;
+	}
+
+	uint32_t want, got;
+	if (sec[15] == 1) {
+		want = edc_stored(sec + 2064);
+		got = edc_compute(sec, 2064);
+	}
+	else if (sec[15] == 2) {
+		/* only the XA forms carry an edc; the 4-byte subheader is stored
+		   twice (16..19 and 20..23). disagreeing copies = either a plain
+		   non-XA mode-2 sector (no edc exists) or corruption we cannot
+		   attribute - count the anomaly, skip the edc claim. all our
+		   mode-2 consoles (psx, cd-i) are XA, so agreement is the norm. */
+		if (memcmp(sec + 16, sec + 20, 4)) {
+			pcd.st_form_bad++;
+			return;
+		}
+		if (sec[18] & 0x20) {
+			/* form 2: edc optional - an all-zero field means "not computed" */
+			want = edc_stored(sec + 2348);
+			if (!want) return;
+			got = edc_compute(sec + 16, 2332);
+		} else {
+			want = edc_stored(sec + 2072);
+			got = edc_compute(sec + 16, 2056);
+		}
+	}
+	else return;                      /* mode 0: zero-filled, no edc field */
+
+	pcd.st_edc_checked++;
+	if (got != want) {
+		pcd.st_edc_bad++;
+		pcd.st_edc_last_lba = lba;
+		/* capped like the BAD logging: serial output in the hot path
+		   stalls the core, so 8 lines then silent counting */
+		if (pcd.st_edc_logged < 8) {
+			pcd.st_edc_logged++;
+			printf("physcd: edc mismatch lba=%d (misread served as-is)%s\n",
+				lba, pcd.st_edc_logged == 8 ? " (further ones counted silently)" : "");
+		}
+	}
+}
+
 static int fill_cache(int lba, int count, int sync)
 {
 	uint8_t burst[BURST * SLOT_SIZE];     /* stack: both threads call here */
@@ -510,6 +646,8 @@ static int fill_cache(int lba, int count, int sync)
 			/* feeds the re-attach probe: a drive that has dropped off
 			   the bus fails every sector, a scratch fails a few */
 			if (rr) pcd.consec_fail++; else pcd.consec_fail = 0;
+			/* integrity pass (stats-only) before the lock; audio has no edc */
+			if (!rr && flags == 0xF8) edc_check_sector(one, lba + i);
 			pthread_mutex_lock(&pcd.lock);
 			slot_t *s = slot_for(lba + i);
 			if (!rr) {
@@ -549,6 +687,16 @@ static int fill_cache(int lba, int count, int sync)
 	pcd.consec_fail = 0;          /* a clean burst: the drive is there */
 
 	int sector_len = PHYSCD_RAW + (with_sub ? PHYSCD_SUB : 0);
+
+	/* integrity pass (stats-only) from the burst buffer, OUTSIDE the lock:
+	   every physically read data sector is verified exactly once, here at
+	   stamping (sync misses, prefetch, prewarm and swap-wake all funnel
+	   through this path). audio tracks carry no edc; the track clamp above
+	   means a burst never mixes types, so one flags test covers it. */
+	if (flags == 0xF8)
+		for (int i = 0; i < count; i++)
+			edc_check_sector(burst + i * sector_len, lba + i);
+
 	pthread_mutex_lock(&pcd.lock);
 	for (int i = 0; i < count; i++) {
 		slot_t *s = slot_for(lba + i);
@@ -576,6 +724,11 @@ static void stats_report()
 		   hits. nonzero here means the disc, not the cache. */
 		fprintf(f, "BAD %u sectors served as zeros  worst drive io %.0f ms\n",
 			pcd.st_bad, pcd.st_worst_io_ms);
+		/* EDC bad = the drive returned bytes that fail the sector's own
+		   checksum: a misread served AS-IS (unlike BAD, which is zeros).
+		   cumulative per mount, like BAD. */
+		fprintf(f, "EDC bad %u / %u checked  malformed %u  last bad lba %d\n",
+			pcd.st_edc_bad, pcd.st_edc_checked, pcd.st_form_bad, pcd.st_edc_last_lba);
 		/* nonzero REATTACH means the drive dropped off the usb bus and
 		   was recovered - that is a power/cabling problem, not media */
 		fprintf(f, "REATTACH %u  (device %s)\n", pcd.st_reattach, cur_dev);
@@ -992,6 +1145,7 @@ int physcd_open(const char *dev)
 
 	quiet_block_probes(cur_dev);
 	set_speed_cap();
+	edc_init();                   /* one-shot lut build + self-test */
 
 	pcd.leadout = 0;
 	pcd.ntrk = 0;
@@ -1175,6 +1329,8 @@ int physcd_load_toc(toc_t *toc)
 	pcd.cursor[0] = toc->tracks[0].start;
 	pcd.last_win = -1;
 	pcd.st_hit = pcd.st_miss = pcd.st_bad = pcd.st_bad_logged = 0;
+	pcd.st_edc_checked = pcd.st_edc_bad = pcd.st_form_bad = pcd.st_edc_logged = 0;
+	pcd.st_edc_last_lba = -1;
 	pcd.st_worst_ms = pcd.st_worst_io_ms = 0.0;
 
 	pcd.leadout = lead.cdte_addr.lba;         /* unblocks prefetch    */

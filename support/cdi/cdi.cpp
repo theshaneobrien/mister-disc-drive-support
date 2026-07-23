@@ -363,7 +363,11 @@ static int load_cue(const char* filename, toc_t* table)
 
 static void unload_phys(toc_t* table)
 {
-	if (table->phys) physcd_close();
+	if (table->phys)
+	{
+		physcd_swap_enable(0);   // any remount/unmount disarms swap detection
+		physcd_close();
+	}
 	memset(table, 0, sizeof(toc_t));
 }
 
@@ -416,42 +420,16 @@ static int load_phys(toc_t* table)
 	/* spin the cold drive up + prime the disc start before the cd-i bios reads,
 	   so the initial load and fmv are not fed by a still-spinning-up drive */
 	physcd_prewarm_blocking();
+	physcd_swap_enable(1);   // arm mid-mount physical disc-swap detection (multi-disc cd-i / 2-disc vcd)
 	return 1;
 }
 
-static int load_cd_image(const char* filename, toc_t* table)
+/* classify the mounted disc for the guest: the SERVO audio-cd flag (derived
+   from the sector 00:02:16 boot header) and the TOC disc type. factored out
+   of load_cd_image so the live disc-swap path (cdi_poll) can re-run it for a
+   newly inserted disc, since disc 2 may differ in type from disc 1. */
+static void classify_disc(toc_t* table)
 {
-	int result = 0;
-
-	if (!strcmp(filename, PHYSCD_SENTINEL))
-	{
-		// physical usb drive. fall through (do NOT early-return) so the
-		// audio-cd probe + disc-type classifier below run over the phys toc.
-		result = load_phys(table);
-	}
-	else
-	{
-		const char* ext = strrchr(filename, '.');
-		if (!ext)
-			return 0;
-
-		/* release a live physical mount FIRST: load_chd/load_cue memset the
-		   toc (clearing toc.phys) without closing the backend, which would
-		   orphan the drive fd + prefetch thread + cache for the session -
-		   with the keepalive spinning the abandoned disc UNCAPPED and
-		   physcd_drive_busy() suppressing acoustic seek for the image game. */
-		if (table->phys) unload_phys(table);
-
-		if (!strncasecmp(".chd", ext, 4))
-		{
-			result = load_chd(filename, table);
-		}
-		else if (!strncasecmp(".cue", ext, 4))
-		{
-			result = load_cue(filename, table);
-		}
-	}
-
 	// On a CDI 210/05 the SERVO has to provide the info
 	// on whether this is an Audio CD to the SLAVE,
 	// which then gives the info to the CDIC driver running on the main CPU.
@@ -504,6 +482,42 @@ static int load_cd_image(const char* filename, toc_t* table)
 	else if ((audio && !mode1 && mode2) || (!audio && !mode1 && mode2))
 		disc_type = DT_CDROMXA;
 	// printf("Disc Type %d%d%d %x\n", audio, mode1, mode2, disc_type);
+}
+
+static int load_cd_image(const char* filename, toc_t* table)
+{
+	int result = 0;
+
+	if (!strcmp(filename, PHYSCD_SENTINEL))
+	{
+		// physical usb drive. fall through (do NOT early-return) so the
+		// audio-cd probe + disc-type classifier below run over the phys toc.
+		result = load_phys(table);
+	}
+	else
+	{
+		const char* ext = strrchr(filename, '.');
+		if (!ext)
+			return 0;
+
+		/* release a live physical mount FIRST: load_chd/load_cue memset the
+		   toc (clearing toc.phys) without closing the backend, which would
+		   orphan the drive fd + prefetch thread + cache for the session -
+		   with the keepalive spinning the abandoned disc UNCAPPED and
+		   physcd_drive_busy() suppressing acoustic seek for the image game. */
+		if (table->phys) unload_phys(table);
+
+		if (!strncasecmp(".chd", ext, 4))
+		{
+			result = load_chd(filename, table);
+		}
+		else if (!strncasecmp(".cue", ext, 4))
+		{
+			result = load_cue(filename, table);
+		}
+	}
+
+	classify_disc(table);
 	return result;
 }
 
@@ -1249,7 +1263,51 @@ int cdi_mount_cd(int s_index, const char* filename)
 	return loaded;
 }
 
-void cdi_poll() {}
+void cdi_poll()
+{
+	/* live physical disc swap: multi-disc cd-i titles and 2-disc vcd movies
+	   ("please insert disc 2"). present the guest a real not-ready -> ready
+	   EDGE, like the proven megacd/saturn cores (which pulse tray OPEN then
+	   STOP): a disc state machine that caches its toc has to SEE the media
+	   leave to invalidate it, so a bare disc-present pulse can be ignored.
+	   the CD-i twist is that the disc status the guest watches lives in the
+	   gateware SERVO HLE, reached by re-pulsing the cd mount (cd_img_mount)
+	   rather than an ARM-set status word: mount_cd(0,0) = no disc / lid open,
+	   mount_cd(size,0) = disc present (the SERVO then forces a mode-fault so
+	   the guest re-polls status and re-reads its toc, finding disc 2). */
+	if (!toc.phys) return;
+
+	static int shown_out = 0;
+
+	/* disc physically out (or back in but not yet read): show an empty drive
+	   ONCE, then wait. the physical swap time is the natural dwell - no timer
+	   needed, unlike megacd's fixed PHYSCD_SWAP_DWELL_MS. */
+	if (physcd_swap_ejected())
+	{
+		if (!shown_out)
+		{
+			shown_out = 1;
+			mount_cd(0, 0);
+		}
+		return;
+	}
+
+	/* swap complete: the backend loaded the new disc's toc on the prefetch
+	   thread (consume() only signals once that toc is ready). adopt it and
+	   re-announce disc present. */
+	if (physcd_swap_consume())
+	{
+		shown_out = 0;
+		toc_t nt = {};
+		if (physcd_current_toc(&nt) || !nt.last) return;   // new toc not ready; retry next poll
+		apply_phys_bias(&nt);
+		toc = nt;                 // cdi_poll and cdi_read_cd share this thread, no lock
+		classify_disc(&toc);      // servo audio flag + disc type for the NEW disc
+		prepare_toc_buffer(&toc); // rebuild the guest-visible toc (Fetch TOC reads this)
+		user_io_set_index(0);
+		mount_cd(toc.end * CDI_SECTOR_LEN, 0);
+	}
+}
 
 void cdi_load_root_nvram()
 {

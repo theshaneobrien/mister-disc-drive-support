@@ -523,6 +523,7 @@ static toc_t toc = {};
 // game keeps the same region across discs, so no disc read needed on a swap)
 static int s_swap_fidx = 1, s_swap_sidx = 1;
 static region_t s_swap_region = UNKNOWN;
+static char s_card_id[64] = {};   /* what the mounted memory card is keyed on (phys) */
 #define CD_SECTOR_LEN 2352
 
 int psx_chd_hunksize()
@@ -793,6 +794,11 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 			{
 				snprintf(phys_name, sizeof(phys_name), "%s",
 					(game_id && game_id[0]) ? game_id : "physcd");
+				/* remember the card key so a later disc swap can tell
+				   whether the new disc needs a different card */
+				snprintf(s_card_id, sizeof(s_card_id), "%s", phys_name);
+				FILE *dl = fopen("/tmp/physcd_psx.log", "a");
+				if (dl) { fprintf(dl, "mount: card key '%s'\n", s_card_id); fclose(dl); }
 			}
 			const char *name = phys ? phys_name : filename;
 
@@ -926,17 +932,76 @@ static void psx_swap_apply()
 	apply_phys_bias(&nt);
 	toc = nt;   // adopt; psx_poll and psx_read_cd run on this same thread, no lock
 
-	// reuse the mount region: a multi-disc game is the same region across
-	// discs, and this keeps the poll thread from doing a disc read here.
+	/* identify the new disc BEFORE announcing it. a DIFFERENT game gets
+	   its real region read off the disc - hardware-observed before this:
+	   an eu game swapped into a us session booted with "Sony Computer
+	   Entertainment Europe" text under an SCEA console, running on us
+	   timing. the same game (multi-disc sets are same-region by
+	   construction) and an id-less disc (music cd in vib ribbon; audio
+	   has no license sector to read) keep the mount region as before.
+	   reads are cached - the swap machinery has already spun the drive
+	   and primed the disc start. */
+	game_info_t gi = psx_get_game_info();
+	int newgame = gi.game_id[0] && strcmp(gi.game_id, s_card_id);
 	region_t region = s_swap_region;
+	if (newgame)
+	{
+		region_t r = psx_get_region();
+		if (r == region_t::UNKNOWN) r = gi.region;   /* prefix fallback, like mount */
+		if (r != region_t::UNKNOWN) { region = r; s_swap_region = r; }
+	}
 
-	// SWAP: reset bit CLEAR, and DO NOT touch the memory card or gameid - the
-	// save follows the game across discs. libcrypt mask 0 is fine for the
-	// multi-disc rpgs this is for (FF etc).
+	// SWAP: reset bit CLEAR so the game keeps going. libcrypt mask 0 is
+	// fine for the multi-disc rpgs this serves (FF etc).
 	printf("PSX: disc swap -> region %s\n", region_string(region));
 	send_cue_and_metadata(&toc, 0, region, 0);
 	user_io_set_index(s_swap_fidx);
 	mount_cd(toc.end * CD_SECTOR_LEN, s_swap_sidx);
+
+	/* re-key the memory card to the disc now in the drive. the original
+	   design left the card alone ("the save follows the game"), which
+	   broke BOTH ways: eject-and-insert a DIFFERENT game and it keeps the
+	   old game's card (its own saves invisible - reported bug), and a
+	   mid-game save after an ff7-style swap landed in disc 1's card where
+	   a later direct boot of disc 2 (which mounts its own card) never
+	   sees it. per-disc cards, re-keyed on every swap, are consistent in
+	   both directions. an id-less disc (a music cd swapped into vib
+	   ribbon) keeps the current card, a same-id reinsert is a no-op, and
+	   [63] (memcard automount off) is respected exactly like the mount
+	   path. the id read costs a few cached sectors on this thread - the
+	   swap machinery has already spun the drive up and primed the disc
+	   start, and the game is sitting at an insert-disc/menu screen. */
+	uint32_t auto_off = user_io_status_get("[63]");
+
+	/* decision log for the re-key: printf lands on the serial console
+	   nobody has attached, so mirror the whole chain into /tmp where a
+	   quick cat can pin which gate fired. append-mode: one mount session
+	   is a handful of lines. */
+	FILE *dl = fopen("/tmp/physcd_psx.log", "a");
+	if (dl) fprintf(dl, "swap: id='%s' card='%s' region=%s automount_off=%u\n",
+		gi.game_id, s_card_id, region_string(region), auto_off);
+
+	if (!gi.game_id[0])
+	{
+		if (dl) fprintf(dl, "swap: no game id readable - memory card kept\n");
+	}
+	else if (!newgame)
+	{
+		if (dl) fprintf(dl, "swap: same game - memory card kept\n");
+	}
+	else if (auto_off)
+	{
+		if (dl) fprintf(dl, "swap: memcard automount is off - card untouched\n");
+	}
+	else
+	{
+		snprintf(s_card_id, sizeof(s_card_id), "%s", gi.game_id);
+		printf("PSX: swap re-keys memory card -> %s\n", s_card_id);
+		if (dl) fprintf(dl, "swap: re-keyed memory card -> %s\n", s_card_id);
+		psx_mount_save(s_card_id);
+		user_io_write_gameid(s_card_id, 0, gi.game_id);
+	}
+	if (dl) fclose(dl);
 }
 
 // manual trigger (swap_phys fifo): re-read the disc now in the drive, then

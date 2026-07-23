@@ -797,6 +797,8 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 				/* remember the card key so a later disc swap can tell
 				   whether the new disc needs a different card */
 				snprintf(s_card_id, sizeof(s_card_id), "%s", phys_name);
+				FILE *dl = fopen("/tmp/physcd_psx.log", "a");
+				if (dl) { fprintf(dl, "mount: card key '%s'\n", s_card_id); fclose(dl); }
 			}
 			const char *name = phys ? phys_name : filename;
 
@@ -955,14 +957,37 @@ static void psx_swap_apply()
 	   swap machinery has already spun the drive up and primed the disc
 	   start, and the game is sitting at an insert-disc/menu screen. */
 	game_info_t gi = psx_get_game_info();
-	if (gi.game_id[0] && strcmp(gi.game_id, s_card_id) &&
-	    !(user_io_status_get("[63]")))
+	uint32_t auto_off = user_io_status_get("[63]");
+
+	/* decision log for the re-key: printf lands on the serial console
+	   nobody has attached, so mirror the whole chain into /tmp where a
+	   quick cat can pin which gate fired. append-mode: one mount session
+	   is a handful of lines. */
+	FILE *dl = fopen("/tmp/physcd_psx.log", "a");
+	if (dl) fprintf(dl, "swap: id='%s' card='%s' automount_off=%u\n",
+		gi.game_id, s_card_id, auto_off);
+
+	if (!gi.game_id[0])
+	{
+		if (dl) fprintf(dl, "swap: no game id readable - memory card kept\n");
+	}
+	else if (!strcmp(gi.game_id, s_card_id))
+	{
+		if (dl) fprintf(dl, "swap: same game - memory card kept\n");
+	}
+	else if (auto_off)
+	{
+		if (dl) fprintf(dl, "swap: memcard automount is off - card untouched\n");
+	}
+	else
 	{
 		snprintf(s_card_id, sizeof(s_card_id), "%s", gi.game_id);
 		printf("PSX: swap re-keys memory card -> %s\n", s_card_id);
+		if (dl) fprintf(dl, "swap: re-keyed memory card -> %s\n", s_card_id);
 		psx_mount_save(s_card_id);
 		user_io_write_gameid(s_card_id, 0, gi.game_id);
 	}
+	if (dl) fclose(dl);
 }
 
 // manual trigger (swap_phys fifo): re-read the disc now in the drive, then

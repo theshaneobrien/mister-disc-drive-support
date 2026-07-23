@@ -73,6 +73,7 @@ static const ini_var_t ini_vars[] =
 	{ "PHYSCD_MOUNT_DELAY", (void*)(&(cfg.physcd_mount_delay)), UINT8, 0, 30 },
 	{ "PHYSCD_ACOUSTIC", (void*)(&(cfg.physcd_acoustic)), UINT8, 0, 1 },
 	{ "PHYSCD_AUDIO_CORE", (void*)(cfg.physcd_audio_core), STRING, 0, sizeof(cfg.physcd_audio_core) - 1 },
+	{ "PHYSCD_VCD_CORE", (void*)(cfg.physcd_vcd_core), STRING, 0, sizeof(cfg.physcd_vcd_core) - 1 },
 	{ "FONT", (void*)(&(cfg.font)), STRING, 0, sizeof(cfg.font) - 1 },
 	{ "FB_SIZE", (void*)(&(cfg.fb_size)), UINT8, 0, 4 },
 	{ "FB_TERMINAL", (void*)(&(cfg.fb_terminal)), UINT8, 0, 1 },
@@ -625,6 +626,7 @@ void cfg_parse()
 	cfg.physcd_mount_delay = 2;	// seconds to let the core settle before mounting
 	cfg.physcd_acoustic = 0;	// prototype, off unless asked for
 	strcpy(cfg.physcd_audio_core, "PSX");	// audio cd -> PSX bios cd player by default
+	strcpy(cfg.physcd_vcd_core, "CDI");	// video cd -> CD-i core by default (it plays them)
 	cfg.video_brightness = 50;
 	cfg.video_contrast = 50;
 	cfg.video_saturation = 100;

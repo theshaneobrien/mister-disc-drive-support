@@ -1090,7 +1090,14 @@ int cdd_t::ReadSubcode(uint16_t* buf)
 		}
 		else
 		{
-			InterleaveSubcode(subc, buf);
+			/* the drive returns raw P-W in FRAME order (byte k = frame k,
+			   bit7=P .. bit0=W) - already the exact byte stream the fpga
+			   wants, which is what InterleaveSubcode PRODUCES from
+			   channel-separated input and what chd SUBCODE_RW_RAW copies
+			   straight through. so copy direct: feeding frame-order data to
+			   InterleaveSubcode (which expects channel-separated input)
+			   scrambles the cd+g graphics into the black-screen we saw. */
+			memcpy(buf, subc, 96);
 		}
 	}
 	else if (this->toc.chd_f)

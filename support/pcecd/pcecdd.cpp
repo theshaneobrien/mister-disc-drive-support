@@ -996,6 +996,24 @@ void pcecdd_t::ReadSubcode(int lba, uint8_t* buf)
 	buf[0] = 0x00;	// synchronization word while playing
 	buf[1] = 0x80;
 
+	if (this->toc.phys)
+	{
+		/* real R-W straight off the physical drive. the drive returns raw
+		   P-W in FRAME order (byte k = frame k, bit7=P .. bit0=W), which is
+		   exactly the per-frame byte the packing loop below produces for the
+		   fpga (channel j -> bit 7-j), so copy direct to buf[2..97]. before
+		   this, phys had NO R-W at all (Q was synthesized, R-W left blank),
+		   so cd+g never drew. on a sector the drive returns no subchannel
+		   for, fall through to the synthesized-Q path so timing/track stay
+		   valid (graphics just blank for that one sector). */
+		uint8_t rawsec[2352], sub[96];
+		if (physcd_read_sector_sub(lba, rawsec, sub))
+		{
+			memcpy(buf + 2, sub, 96);
+			return;
+		}
+	}
+
 	if ((lba != last_lba) && (this->latency == 0)) {	// continue sending old subcode data until head arrives at new location
 		if (this->subcode_file) {			// read subcode data from file if it exists
 			fseek(this->subcode_file, (lba * 96), SEEK_SET);

@@ -932,9 +932,24 @@ static void psx_swap_apply()
 	apply_phys_bias(&nt);
 	toc = nt;   // adopt; psx_poll and psx_read_cd run on this same thread, no lock
 
-	// reuse the mount region: a multi-disc game is the same region across
-	// discs, and this keeps the poll thread from doing a disc read here.
+	/* identify the new disc BEFORE announcing it. a DIFFERENT game gets
+	   its real region read off the disc - hardware-observed before this:
+	   an eu game swapped into a us session booted with "Sony Computer
+	   Entertainment Europe" text under an SCEA console, running on us
+	   timing. the same game (multi-disc sets are same-region by
+	   construction) and an id-less disc (music cd in vib ribbon; audio
+	   has no license sector to read) keep the mount region as before.
+	   reads are cached - the swap machinery has already spun the drive
+	   and primed the disc start. */
+	game_info_t gi = psx_get_game_info();
+	int newgame = gi.game_id[0] && strcmp(gi.game_id, s_card_id);
 	region_t region = s_swap_region;
+	if (newgame)
+	{
+		region_t r = psx_get_region();
+		if (r == region_t::UNKNOWN) r = gi.region;   /* prefix fallback, like mount */
+		if (r != region_t::UNKNOWN) { region = r; s_swap_region = r; }
+	}
 
 	// SWAP: reset bit CLEAR so the game keeps going. libcrypt mask 0 is
 	// fine for the multi-disc rpgs this serves (FF etc).
@@ -956,7 +971,6 @@ static void psx_swap_apply()
 	   path. the id read costs a few cached sectors on this thread - the
 	   swap machinery has already spun the drive up and primed the disc
 	   start, and the game is sitting at an insert-disc/menu screen. */
-	game_info_t gi = psx_get_game_info();
 	uint32_t auto_off = user_io_status_get("[63]");
 
 	/* decision log for the re-key: printf lands on the serial console
@@ -964,14 +978,14 @@ static void psx_swap_apply()
 	   quick cat can pin which gate fired. append-mode: one mount session
 	   is a handful of lines. */
 	FILE *dl = fopen("/tmp/physcd_psx.log", "a");
-	if (dl) fprintf(dl, "swap: id='%s' card='%s' automount_off=%u\n",
-		gi.game_id, s_card_id, auto_off);
+	if (dl) fprintf(dl, "swap: id='%s' card='%s' region=%s automount_off=%u\n",
+		gi.game_id, s_card_id, region_string(region), auto_off);
 
 	if (!gi.game_id[0])
 	{
 		if (dl) fprintf(dl, "swap: no game id readable - memory card kept\n");
 	}
-	else if (!strcmp(gi.game_id, s_card_id))
+	else if (!newgame)
 	{
 		if (dl) fprintf(dl, "swap: same game - memory card kept\n");
 	}

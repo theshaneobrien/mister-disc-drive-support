@@ -242,7 +242,17 @@ static int ini_get_section(char* buf, const char *vmode)
 		if (i >= INI_LINE_SIZE) return 0;
 	}
 
+	/* "physcd" is an always-active section, in every process (menu + cores):
+	   the documented home for the PHYSCD_* settings. any OTHER Main binary
+	   (stock, odelot's MiSTer_RA, whatever a main= override points at) hits
+	   its normal unknown-section path here and skips the whole block
+	   SILENTLY - unlike unknown keys inside [MiSTer], which every binary
+	   warns about. that is the point: physcd settings in their own section
+	   can never make a foreign binary complain. [MiSTer] placement still
+	   works for our binary (the keys stay registered), it is just noisy on
+	   setups that route some cores to a non-physcd Main. */
 	if (!strcasecmp(buf, "MiSTer") ||
+		!strcasecmp(buf, "physcd") ||
 		(is_arcade() && !strcasecmp(buf, "arcade")) ||
 		(arcade_is_vertical() && !strcasecmp(buf, "arcade_vertical")) ||
 		((wc_pos >= 0) ? !strncasecmp(buf, user_io_get_core_name(1), wc_pos) : !strcasecmp(buf, user_io_get_core_name(1))) ||

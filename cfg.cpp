@@ -628,7 +628,7 @@ void cfg_parse()
 	cfg.physcd_acoustic = 0;	// prototype, off unless asked for
 	strcpy(cfg.physcd_audio_core, "PSX");	// audio cd -> PSX bios cd player by default
 	strcpy(cfg.physcd_vcd_core, "CDI");	// video cd -> CD-i core by default (it plays them)
-	strcpy(cfg.physcd_cdg_core, "CDI");	// cd+g -> CD-i core by default (it draws the graphics)
+	strcpy(cfg.physcd_cdg_core, "MegaCD");	// cd+g -> MegaCD by default (MegaCD + TurboGrafx16 draw the graphics on released cores)
 	cfg.video_brightness = 50;
 	cfg.video_contrast = 50;
 	cfg.video_saturation = 100;

@@ -227,8 +227,18 @@ static CoreMatch findCore(const char *name, const char *coreName)
 		}
 		else
 		{
-			// Exact filename match (any extension)
-			if (!strcmp(coreName, entry->d_name))
+			// Exact match: the full filename (any extension), OR the core
+			// basename plus ".rbf". without the basename case, a coreName
+			// like "PSX" never equals the filename "PSX.rbf", so a user's
+			// pinned/renamed core is invisible and the newest-dated scan
+			// below could silently boot a STALE "PSX_YYYYMMDD.rbf" leftover
+			// (physcd autoboot on curated card layouts especially), or find
+			// nothing at all if only the plain-named rbf exists. a pinned
+			// <core>.rbf is a deliberate choice, so prefer it (exact wins).
+			size_t cn = strlen(coreName);
+			bool basename_rbf = !strncmp(coreName, entry->d_name, cn)
+			                    && !strcmp(entry->d_name + cn, ".rbf");
+			if (!strcmp(coreName, entry->d_name) || basename_rbf)
 			{
 				CoreMatch exact;
 				exact.exact = true;

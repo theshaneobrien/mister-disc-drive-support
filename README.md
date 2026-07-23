@@ -101,15 +101,18 @@ Swap albums live and the player picks up the new disc and its track list. The st
 
 ## Settings
 
-In MiSTer.ini, under [MiSTer]:
+In MiSTer.ini, in their own [physcd] section:
 
 ```
+[physcd]
 PHYSCD_AUTOBOOT=1     ; 1 auto-loads a disc at the menu (default), 0 is manual, Play row only
 PHYSCD_MOUNT_DELAY=2  ; seconds to let a core settle before mounting, raise it if a game misses the disc
 PHYSCD_DEVICE=        ; optional, pin one drive such as /dev/sr1, blank means autodetect
 PHYSCD_ACOUSTIC=0     ; 1 = a spare disc in the drive spins and seeks along with image games, see below
 PHYSCD_AUDIO_CORE=PSX ; which console's CD player an audio disc boots: PSX, MegaCD, Saturn, NeoGeo, or TurboGrafx16
 ```
+
+They also work under [MiSTer], but keeping them in their own section means any other MiSTer binary on your card (like MiSTer Companion's MiSTer_RA) skips them quietly instead of popping unknown option warnings at boot.
 
 ## Acoustic seek / Disc Mirroring
 

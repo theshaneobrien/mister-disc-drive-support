@@ -1457,6 +1457,16 @@ physcd_disc_t physcd_identify()
 		if (!memcmp(iso + 1, "CD001", 5)) {
 			if (!memcmp(iso + 8, "PLAYSTATION", 11)) return PHYSCD_DISC_PSX;
 			if (!memcmp(iso + 8, "NGCD", 4)) return PHYSCD_DISC_NEOGEO;
+			/* video cd / super vcd / photo cd / cd-i digital video are all
+			   CD-BRIDGE discs (white book): a "CD001" iso volume whose SYSTEM
+			   identifier (same field psx stamps "PLAYSTATION" in) is
+			   "CD-RTOS CD-BRIDGE", and which carry a /CDI application on the
+			   disc that a cd-i player auto-runs. so boot the cd-i core and let
+			   the disc's own app drive it. whether it actually plays depends on
+			   the core emulating the cd-i digital-video (mpeg) hardware -
+			   experimental. cd-i GAME discs use the "CD-I " standard id caught
+			   above, so this never collides with them. */
+			if (!memcmp(iso + 8, "CD-RTOS CD-BRIDGE", 17)) return PHYSCD_DISC_CDI;
 		}
 	}
 

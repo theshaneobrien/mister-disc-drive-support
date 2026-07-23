@@ -10,6 +10,7 @@ This is a fork of Main_MiSTer, the ARM/Linux side of MiSTer. All the work is in 
 * Disc swapping. A multi disc PlayStation game asks for the next disc, you swap it, it keeps playing. ([Video](https://youtu.be/J477S55O5DE))
 * Vib Ribbon with your own music. Boot the game, swap in any album off your shelf. ([Video](https://youtu.be/msHR5iKsleY))
 * Audio CDs. Put a music disc in and the MiSTer boots a console's built in CD player. Swap albums whenever. Choose your default console as a player. ([Video](https://youtu.be/r3Z2uLo_iXA))
+* Video CDs. Pop a VCD in and it plays through the CD-i core, which turns out to emulate the CD-i digital video hardware. The MiSTer as a Video CD player.
 * The disc is detected automatically and the right core loads.
 * Autoboot when you drop a disc in, or a manual Play row in the menu.
 * RetroAchievements earned straight off the physical disc, on the RA build (Really depends on your disc and supported hashes).
@@ -121,6 +122,7 @@ PHYSCD_MOUNT_DELAY=2  ; seconds to let a core settle before mounting, raise it i
 PHYSCD_DEVICE=        ; optional, pin one drive such as /dev/sr1, blank means autodetect
 PHYSCD_ACOUSTIC=0     ; 1 = a spare disc in the drive spins and seeks along with image games, see below
 PHYSCD_AUDIO_CORE=PSX ; which console's CD player an audio disc boots: PSX, MegaCD, Saturn, NeoGeo, or TurboGrafx16
+PHYSCD_VCD_CORE=CDI   ; which core a Video CD boots: CDI plays them, others are there to experiment with
 ```
 
 They also work under [MiSTer], but keeping them in their own section means any other MiSTer binary on your card (like MiSTer Companion's MiSTer_RA) skips them quietly instead of popping unknown option warnings at boot.

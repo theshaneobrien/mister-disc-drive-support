@@ -1423,6 +1423,43 @@ int physcd_read_data2048(int lba, uint8_t *dst)
 
 // ---------------------------------------------------------------- ident
 
+/* cd+g probe for an audio-only disc. cd+g karaoke graphics ride in the
+   R-W subchannel: the 96 raw subchannel bytes per sector carry 96
+   six-bit symbols (low 6 bits of each byte) forming four 24-symbol
+   packs, and a pack whose command symbol is 9 ("TV graphics") is cd+g.
+   the subchannel comes off the disc raw and uncorrected, so a stray
+   bit flip can fake a lone 9 - require a pile of hits before believing
+   it. samples a few seconds into each of the first two tracks (some
+   karaoke discs open with a graphics-less intro track). */
+static int probe_cdg(void)
+{
+	/* the toc-time subchannel probe can come back inconclusive (-1,
+	   "couldn't tell, retry later") and nothing else ever retries it -
+	   without this a cd+g disc identified in that state is stuck as
+	   plain AUDIO for the whole insertion. one more try, aimed at the
+	   audio region we are about to sample anyway. */
+	if (pcd.sub_ok < 0 && pcd.ntrk > 0 && pcd.trk[0].audio)
+		probe_subchannel(pcd.trk[0].start + 3 * 75);
+
+	if (pcd.sub_ok != 1) return 0;     /* drive gives no subchannel */
+
+	uint8_t raw[PHYSCD_RAW], sub[PHYSCD_SUB];
+	int hits = 0;
+
+	for (int t = 0; t < 2 && t < pcd.ntrk; t++) {
+		if (!pcd.trk[t].audio) continue;
+		int lba = pcd.trk[t].start + 3 * 75;        /* 3s in */
+		int end = lba + 40;
+		if (end > pcd.trk[t].end) end = pcd.trk[t].end;
+		for (; lba < end; lba++) {
+			if (!physcd_read_sector_sub(lba, raw, sub)) continue;
+			for (int p = 0; p < PHYSCD_SUB; p += 24)
+				if ((sub[p] & 0x3F) == 9 && ++hits >= 8) return 1;
+		}
+	}
+	return 0;
+}
+
 physcd_disc_t physcd_identify()
 {
 	uint8_t raw[PHYSCD_RAW * 2];
@@ -1432,7 +1469,8 @@ physcd_disc_t physcd_identify()
 		/* toc not loaded yet or audio-only disc                  */
 		toc_t tmp;
 		if (physcd_load_toc(&tmp)) return PHYSCD_DISC_NONE;
-		if (pcd.first_data_lba < 0) return PHYSCD_DISC_AUDIO;
+		if (pcd.first_data_lba < 0)
+			return probe_cdg() ? PHYSCD_DISC_CDG : PHYSCD_DISC_AUDIO;
 	}
 
 	int base = pcd.first_data_lba;
@@ -1669,6 +1707,7 @@ const char *physcd_console_name(physcd_disc_t t)
 	case PHYSCD_DISC_3DO:    return "3DO";
 	case PHYSCD_DISC_CDI:    return "CD-i";
 	case PHYSCD_DISC_VCD:    return "Video CD";
+	case PHYSCD_DISC_CDG:    return "CD+G";
 	default:                 return physcd_disc_name(t);
 	}
 }
@@ -1684,6 +1723,7 @@ const char *physcd_disc_name(physcd_disc_t t)
 	case PHYSCD_DISC_3DO:    return "3DO";
 	case PHYSCD_DISC_CDI:    return "CD-i";
 	case PHYSCD_DISC_VCD:    return "Video CD";
+	case PHYSCD_DISC_CDG:    return "CD+G";
 	case PHYSCD_DISC_AUDIO:  return "Audio CD";
 	case PHYSCD_DISC_NONE:   return "No Disc";
 	default:                 return "Unknown";

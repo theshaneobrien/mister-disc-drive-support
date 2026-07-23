@@ -1054,9 +1054,19 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 							   byteswap: the drive returns cdda little-endian like a
 							   bin, only chd stores it big-endian. */
 							int read_lba = lba - 150;
-							if (physcd_read_sector(read_lba, buffer, NULL))
-								memset(buffer, 0, CDI_SECTOR_LEN);
-							/* subc_filled stays false -> rw[] zeroed downstream */
+							if (physcd_read_sector_sub(read_lba, buffer, subc.data()))
+							{
+								/* real raw P-W off the drive: interleaved, low 6
+								   bits of each byte = R..W - the exact layout the
+								   CDIC wants (same as chd SUBCODE_RW_RAW), so no
+								   reinterleave. this is what draws cd+g karaoke
+								   graphics on an audio disc. */
+								subc_filled = true;
+							}
+							/* else: read failed or the drive has no subchannel.
+							   either way buffer holds sector data or defined
+							   zeros (the backend never leaves dst stale) and
+							   rw[] stays zeroed downstream, as before. */
 						}
 						else if (toc.chd_f)
 						{

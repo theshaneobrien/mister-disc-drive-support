@@ -1432,13 +1432,6 @@ int physcd_read_data2048(int lba, uint8_t *dst)
    it. */
 static int probe_cdg(void)
 {
-	/* decision log for hardware diagnosis: /tmp/physcd_cdg.log says
-	   whether the drive gave subchannel at all, what the raw bytes
-	   look like (interleaved vs some drive-specific layout), and how
-	   many cd+g command packs were seen. */
-	FILE *lf = fopen("/tmp/physcd_cdg.log", "w");
-	int sub_at_toc = pcd.sub_ok;
-
 	/* the toc-time subchannel probe can come back inconclusive (-1,
 	   "couldn't tell, retry later") and nothing else ever retries it -
 	   without this a cd+g disc identified in that state is stuck as
@@ -1447,16 +1440,10 @@ static int probe_cdg(void)
 	if (pcd.sub_ok < 0 && pcd.ntrk > 0 && pcd.trk[0].audio)
 		probe_subchannel(pcd.trk[0].start + 3 * 75);
 
-	if (lf) fprintf(lf, "sub_ok: %d at toc, %d after retry\n",
-	                sub_at_toc, pcd.sub_ok);
-
-	if (pcd.sub_ok != 1) {             /* drive gives no subchannel */
-		if (lf) { fprintf(lf, "verdict: no subchannel -> Audio CD\n"); fclose(lf); }
-		return 0;
-	}
+	if (pcd.sub_ok != 1) return 0;     /* drive gives no subchannel */
 
 	uint8_t raw[PHYSCD_RAW], sub[PHYSCD_SUB];
-	int hits = 0, dumped = 0;
+	int hits = 0;
 
 	/* sample windows spread across the WHOLE program area, not the head
 	   of the first tracks: discs put packs where the lyrics are, not at
@@ -1466,41 +1453,19 @@ static int probe_cdg(void)
 	enum { CDG_WINDOWS = 10, CDG_WSEC = 20, CDG_NEED = 6 };
 	int lo = pcd.trk[0].start + 150;
 	int hi = pcd.leadout - 150;
-	if (hi <= lo) { if (lf) { fprintf(lf, "verdict: disc too short\n"); fclose(lf); } return 0; }
+	if (hi <= lo) return 0;
 
 	for (int w = 0; w < CDG_WINDOWS && hits < CDG_NEED; w++) {
 		int base = lo + (int)(((int64_t)(hi - lo) * w) / CDG_WINDOWS);
-		int withsub = 0, nosub = 0, badread = 0, whits = 0;
 		for (int s = 0; s < CDG_WSEC && base + s < hi; s++) {
-			if (!physcd_read_sector_sub(base + s, raw, sub)) {
-				/* split "no subchannel" from "sector unreadable" -
-				   the re-read is a cache hit, effectively free */
-				if (!physcd_read_sector(base + s, raw, NULL)) nosub++;
-				else badread++;
-				continue;
-			}
-			withsub++;
+			if (!physcd_read_sector_sub(base + s, raw, sub)) continue;
 			for (int p = 0; p < PHYSCD_SUB; p += 24)
-				if ((sub[p] & 0x3F) == 9) whits++;
-			if (lf && whits && !dumped) {
-				dumped = 1;
-				fprintf(lf, "first cd+g sub block (lba %d), raw 96:\n", base + s);
-				for (int i = 0; i < PHYSCD_SUB; i++)
-					fprintf(lf, "%02X%s", sub[i], (i % 24 == 23) ? "\n" : " ");
-			}
+				if ((sub[p] & 0x3F) == 9) hits++;
 		}
-		hits += whits;
-		if (lf) fprintf(lf, "window %d @%d: %d with sub, %d without, %d unreadable, %d cd+g packs\n",
-		                w, base, withsub, nosub, badread, whits);
 	}
 
-	if (lf) {
-		/* sub_ok flipping 1 -> 0 mid-sample = the burst fallback fired
-		   (drive rejects multi-sector subchannel reads) */
-		fprintf(lf, "sub_ok after sampling: %d\n", pcd.sub_ok);
-		fprintf(lf, "verdict: %d packs -> %s\n", hits, hits >= CDG_NEED ? "CD+G" : "Audio CD");
-		fclose(lf);
-	}
+	if (hits >= CDG_NEED)
+		printf("\x1b[32mphyscd: CD+G disc (%d graphics packs sampled)\n\x1b[0m", hits);
 	return hits >= CDG_NEED;
 }
 

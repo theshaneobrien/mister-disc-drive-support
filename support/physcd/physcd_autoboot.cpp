@@ -82,15 +82,15 @@ static physcd_disc_t physcd_vcd_console(void)
 	return parse_console(cfg.physcd_vcd_core, PHYSCD_DISC_CDI);
 }
 
-/* which core a cd+g disc (audio cd with karaoke graphics in the R-W
-   subchannel) boots into. PHYSCD_CDG_CORE, default CD-i - its CDIC
-   decodes the subchannel and its cd player draws the graphics; every
-   other console just plays it as a plain audio cd. set it to your
-   PHYSCD_AUDIO_CORE value if you would rather cd+g discs behave like
-   any other audio cd. */
+/* which core a cd+g karaoke disc (audio cd with graphics in the R-W
+   subchannel) boots into. PHYSCD_CDG_CORE, default MegaCD - MegaCD and
+   TurboGrafx16 draw the graphics through their bios cd player straight
+   off a physical disc (hardware-confirmed). CD-i's player does cd+g too
+   but only on a core built after 2026-05-24; older released cd-i cores
+   show a blank graphics screen. any other console just plays the audio. */
 static physcd_disc_t physcd_cdg_console(void)
 {
-	return parse_console(cfg.physcd_cdg_core, PHYSCD_DISC_CDI);
+	return parse_console(cfg.physcd_cdg_core, PHYSCD_DISC_MEGACD);
 }
 
 /*

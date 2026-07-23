@@ -48,7 +48,7 @@ For core requests, I've added everything I own discs for, I'm not sure about tes
 ## Setup
 
 1. Grab the binary from the releases page, Disc and/or Disc plus RetroAchievements. Back up your current /media/fat/MiSTer and/or /media/fat/MiSTer_RA.
-2. Rename our MiSTer_disc or MiSTer_disc_RA to MiSTer and replace the MiSTer file on your sd card with it, optionally, if you use MiSTer Companion, replace both MiSTer and MiSTer_RA with our respective versions (rename our to match the ones you're replacing.
+2. Rename our MiSTer_disc or MiSTer_disc_RA to MiSTer and replace the MiSTer file on your sd card with it, optionally, if you use MiSTer Companion and Retro Achievements, if you use RA, put the RA build in both (rename our to match the ones you're replacing).
 3. Set each CD core's Region to Auto where it has the option, see Region.
 4. For RetroAchievements setup use MisterCompanion or follow their repos instructions.
 

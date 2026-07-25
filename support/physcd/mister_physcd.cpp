@@ -30,7 +30,7 @@
 
 // ---------------------------------------------------------------- state
 
-#define CACHE_SECTORS 4096            /* 4096 * 2448B ~= 9.5MB of ram   */
+#define CACHE_SECTORS 8192            /* 8192 * 2448B ~= 19MB (Tier1: 2x history) */
 #define NWIN 2                        /* one window per stream          */
 #define WIN_SECTORS (CACHE_SECTORS / NWIN)
 #define SLOT_SIZE (PHYSCD_RAW + PHYSCD_SUB)
@@ -173,10 +173,23 @@ static struct {
 	uint32_t st_form_bad;         /* malformed structure (sync/mode/subheader) */
 	uint32_t st_edc_logged;       /* log cap, mirrors st_bad_logged */
 	int st_edc_last_lba;          /* -1 = none */
+	/* sync-stall telemetry (Tier 0): the inline fill_cache on a consumer
+	   cache miss blocks the fpga-answering thread. cumulative per mount like
+	   st_bad; written on the miss path (read_sector_impl), read on the
+	   prefetch thread in stats_report - the accepted telemetry race above. */
+	uint32_t st_sync_n;           /* consumer sync fills measured         */
+	uint32_t st_sync_data;        /* ...on a data track                   */
+	uint32_t st_sync_audio;       /* ...on an audio track                 */
+	uint32_t st_sync_50;          /* ...that blocked  >50 ms              */
+	uint32_t st_sync_250;         /* ...that blocked >250 ms              */
+	uint32_t st_sync_1000;        /* ...that blocked  >1 s                */
+	double   st_sync_worst_ms;    /* worst single inline fill, cumulative */
+	double   st_sync_total_ms;    /* summed inline blocked time           */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
 	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0,
-	  0, 0, 0, 0, -1 };
+	  0, 0, 0, 0, -1,
+	  0, 0, 0, 0, 0, 0, 0.0, 0.0 };
 
 /* "a swap happened during this mount" must survive the core-exit exec (the
    menu runs in a FRESH process - fpga_load_rbf execs; see physcd_autoboot.h,
@@ -729,6 +742,14 @@ static void stats_report()
 		   cumulative per mount, like BAD. */
 		fprintf(f, "EDC bad %u / %u checked  malformed %u  last bad lba %d\n",
 			pcd.st_edc_bad, pcd.st_edc_checked, pcd.st_form_bad, pcd.st_edc_last_lba);
+		/* SYNC stall = the inline fill_cache on a consumer cache miss, which
+		   freezes the fpga-answering thread (input + osd) until it returns.
+		   cumulative per mount like BAD/EDC. once the audio-nonblock change
+		   lands, audio misses stop blocking and this becomes data-only. */
+		fprintf(f, "SYNC stall n %u (data %u audio %u)  >50ms %u  >250ms %u  >1s %u  worst %.0f ms  total %.0f ms\n",
+			pcd.st_sync_n, pcd.st_sync_data, pcd.st_sync_audio,
+			pcd.st_sync_50, pcd.st_sync_250, pcd.st_sync_1000,
+			pcd.st_sync_worst_ms, pcd.st_sync_total_ms);
 		/* nonzero REATTACH means the drive dropped off the usb bus and
 		   was recovered - that is a power/cabling problem, not media */
 		fprintf(f, "REATTACH %u  (device %s)\n", pcd.st_reattach, cur_dev);
@@ -1332,6 +1353,9 @@ int physcd_load_toc(toc_t *toc)
 	pcd.st_edc_checked = pcd.st_edc_bad = pcd.st_form_bad = pcd.st_edc_logged = 0;
 	pcd.st_edc_last_lba = -1;
 	pcd.st_worst_ms = pcd.st_worst_io_ms = 0.0;
+	pcd.st_sync_n = pcd.st_sync_data = pcd.st_sync_audio = 0;
+	pcd.st_sync_50 = pcd.st_sync_250 = pcd.st_sync_1000 = 0;
+	pcd.st_sync_worst_ms = pcd.st_sync_total_ms = 0.0;
 
 	pcd.leadout = lead.cdte_addr.lba;         /* unblocks prefetch    */
 
@@ -1525,6 +1549,17 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 	pcd.st_miss++;
 	double d = now_ms() - t0;
 	if (d > pcd.st_worst_ms) pcd.st_worst_ms = d;
+
+	/* sync-stall telemetry (Tier 0 baseline): characterize the inline fill
+	   that just froze this thread. w is the track type (win_of, above); d is
+	   already computed - no added syscalls, and this is past the hit return. */
+	pcd.st_sync_n++;
+	if (w == 1) pcd.st_sync_audio++; else pcd.st_sync_data++;
+	pcd.st_sync_total_ms += d;
+	if (d > pcd.st_sync_worst_ms) pcd.st_sync_worst_ms = d;
+	if (d >   50.0) pcd.st_sync_50++;
+	if (d >  250.0) pcd.st_sync_250++;
+	if (d > 1000.0) pcd.st_sync_1000++;
 
 	if (!fr) {
 		pthread_mutex_lock(&pcd.lock);

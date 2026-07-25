@@ -46,6 +46,7 @@ For core requests, I've added everything I own discs for, I'm not sure about tes
   * LIUAN External CD DVD Drive, model B0260, https://www.amazon.co.uk/dp/B0BB6YCHK4 (This one kinda sucks, the disc tray won't open if its too warm)
 * Tested by others
   * SuperDock (Tested by Long-Marsupial3422)
+  * LG BP50NB40 CD/DVD/BD (Tested by indigo)
 * A decent power supply for the drive. This one matters. A CD drive pulls a big gulp of current spinning up for a seek, and the DE10-nano's USB or a cheap hub will sag under it, drop the drive off the bus, and take your controllers with it for a minute. Use a powered hub, ideally give the drive its own supply. A game that freezes for a minute then carries on by itself is power, not the software.
 
 ## Setup

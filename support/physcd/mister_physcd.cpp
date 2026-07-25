@@ -34,7 +34,11 @@
 #define NWIN 2                        /* one window per stream          */
 #define WIN_SECTORS (CACHE_SECTORS / NWIN)
 #define SLOT_SIZE (PHYSCD_RAW + PHYSCD_SUB)
-#define READAHEAD 96                  /* sectors ahead, per window      */
+#define READAHEAD 96                  /* default/fallback prefetch scan depth */
+#define RA_SHALLOW 96                 /* random / mixed-mode / audio-active data: = old fixed depth, never worse */
+#define RA_DEEP 256                   /* a lone proven-sequential data stream (fmv, bulk load) reads deep (~3.4s cushion) */
+#define RA_AUDIO 192                  /* cdda is always linear: deeper steady buffer, no seek cost */
+#define RA_SEQ_THRESH 16              /* consecutive +1 reads before a stream counts as sequential */
 #define BURST 16                      /* sectors per drive transaction  */
 #define PREWARM_SECTORS 768           /* cold-start spin-up read (~10s)  */
 #define STATS_MS 5000
@@ -185,11 +189,18 @@ static struct {
 	uint32_t st_sync_1000;        /* ...that blocked  >1 s                */
 	double   st_sync_worst_ms;    /* worst single inline fill, cumulative */
 	double   st_sync_total_ms;    /* summed inline blocked time           */
+	/* adaptive prefetch depth (Tier 1.4): per-window prefetch scan DISTANCE
+	   (not transaction size - BURST is unchanged). deep for a lone proven-
+	   sequential data stream, shallow for random / mixed-mode. */
+	volatile int ra_depth[NWIN];  /* current prefetch scan distance, per window */
+	int last_read_lba[NWIN];      /* consumer sequentiality tracker (-1 = none) */
+	int seq_run[NWIN];            /* consecutive +1 reads, capped at RA_SEQ_THRESH */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
 	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0,
 	  0, 0, 0, 0, -1,
-	  0, 0, 0, 0, 0, 0, 0.0, 0.0 };
+	  0, 0, 0, 0, 0, 0, 0.0, 0.0,
+	  {RA_SHALLOW, RA_SHALLOW}, {-1, -1}, {0, 0} };
 
 /* "a swap happened during this mount" must survive the core-exit exec (the
    menu runs in a FRESH process - fpga_load_rbf execs; see physcd_autoboot.h,
@@ -1029,7 +1040,8 @@ static void *prefetch_thread(void *arg)
 			int w = (rr + n) % NWIN;
 			if (!pcd.wactive[w]) continue;
 			int pos = pcd.cursor[w];
-			for (int i = 0; i < READAHEAD; i++) {
+			int depth = pcd.ra_depth[w] ? pcd.ra_depth[w] : READAHEAD;
+			for (int i = 0; i < depth; i++) {
 				int lba = pos + i;
 				if (lba >= pcd.leadout) break;
 				if (win_of(lba) != w) break;   /* left the stream */
@@ -1171,7 +1183,7 @@ int physcd_open(const char *dev)
 	pcd.leadout = 0;
 	pcd.ntrk = 0;
 	pcd.sub_ok = -1;
-	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; }
+	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; pcd.ra_depth[w] = RA_SHALLOW; pcd.last_read_lba[w] = -1; pcd.seq_run[w] = 0; }
 	pcd.last_win = -1;
 	pcd.prewarm = -1;
 	pcd.st_hit = pcd.st_miss = 0;
@@ -1346,7 +1358,7 @@ int physcd_load_toc(toc_t *toc)
 	   the head is never pulled to the data track it will never ask for. a game
 	   activates window 0 on its first boot read, at the cursor already primed
 	   here. */
-	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; }
+	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; pcd.ra_depth[w] = RA_SHALLOW; pcd.last_read_lba[w] = -1; pcd.seq_run[w] = 0; }
 	pcd.cursor[0] = toc->tracks[0].start;
 	pcd.last_win = -1;
 	pcd.st_hit = pcd.st_miss = pcd.st_bad = pcd.st_bad_logged = 0;
@@ -1522,6 +1534,23 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 	int w = win_of(lba);
 	pcd.wactive[w] = 1;
 	pcd.last_win = w;        /* the stream the core is actually reading */
+
+	/* adaptive prefetch depth: grow the background scan distance for a lone
+	   proven-sequential data stream, stay shallow on random / mixed-mode
+	   (audio active) so deep data read-ahead never seesaws the head against
+	   the far-off cdda track. only the scan DISTANCE changes; the transaction
+	   size (BURST) is untouched, so a consumer miss never queues behind a
+	   longer background read. integer-only, no lock, no syscall. */
+	int prev = pcd.last_read_lba[w];
+	if (prev >= 0 && lba == prev + 1) {
+		if (pcd.seq_run[w] < RA_SEQ_THRESH) pcd.seq_run[w]++;
+	} else if (prev < 0 || lba < prev || lba > prev + 8) {
+		pcd.seq_run[w] = 0;   /* a jump (or first read): fall back to shallow */
+	}
+	pcd.last_read_lba[w] = lba;
+	pcd.ra_depth[w] = (w == 1) ? RA_AUDIO
+	                : (pcd.seq_run[w] >= RA_SEQ_THRESH && !pcd.wactive[1]) ? RA_DEEP
+	                : RA_SHALLOW;
 
 	pthread_mutex_lock(&pcd.lock);
 	slot_t *s = slot_for(lba);

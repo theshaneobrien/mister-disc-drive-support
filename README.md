@@ -19,10 +19,6 @@ This is a fork of Main_MiSTer, the ARM/Linux side of MiSTer. All the work is in 
 * Region sorted per core, usually just set it to Auto.
 * Acoustic Disc Mirror: pop a spare disc in and the drive spins and seeks along with CHD games you play off the SD card, for the sound of a real console. ([Video](https://youtu.be/H7zMJVK5tPI))
 
-## Heads up, this was written with AI
-
-Most of the code was written with an AI assistant (Claude), with me steering, reviewing every change, and testing on real hardware. It boots real games, earns achievements off a spinning disc, and has been through adversarial code review. Still, treat it like any hobby fork: back up your working MiSTer binary before you swap this one in.
-
 ## Two versions, pick one
 
 Two builds on the releases page:

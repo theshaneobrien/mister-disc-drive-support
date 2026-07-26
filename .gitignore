@@ -1,5 +1,5 @@
 # the Main_MiSTer fork is its own git repo (branch physcd), pushed to the
-# same remote as branch `physcd`. see PROJECT.md section 4.
+# same remote as branch `physcd`.
 Main_MiSTer/
 
 # build artifacts. physcd_probe (the static armhf tool) IS committed as a

@@ -195,12 +195,13 @@ static struct {
 	volatile int ra_depth[NWIN];  /* current prefetch scan distance, per window */
 	int last_read_lba[NWIN];      /* consumer sequentiality tracker (-1 = none) */
 	int seq_run[NWIN];            /* consecutive +1 reads, capped at RA_SEQ_THRESH */
+	uint32_t st_aud_async;        /* audio sectors silenced without blocking (Tier 1.2) */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
 	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0,
 	  0, 0, 0, 0, -1,
 	  0, 0, 0, 0, 0, 0, 0.0, 0.0,
-	  {RA_SHALLOW, RA_SHALLOW}, {-1, -1}, {0, 0} };
+	  {RA_SHALLOW, RA_SHALLOW}, {-1, -1}, {0, 0}, 0 };
 
 /* "a swap happened during this mount" must survive the core-exit exec (the
    menu runs in a FRESH process - fpga_load_rbf execs; see physcd_autoboot.h,
@@ -761,6 +762,10 @@ static void stats_report()
 			pcd.st_sync_n, pcd.st_sync_data, pcd.st_sync_audio,
 			pcd.st_sync_50, pcd.st_sync_250, pcd.st_sync_1000,
 			pcd.st_sync_worst_ms, pcd.st_sync_total_ms);
+		/* audio sectors served as silence by the non-blocking audio path
+		   (Tier 1.2) instead of freezing the loop. once this landed the SYNC
+		   audio column above should sit near 0; this is where those went. */
+		fprintf(f, "audio async-silenced %u sectors\n", pcd.st_aud_async);
 		/* nonzero REATTACH means the drive dropped off the usb bus and
 		   was recovered - that is a power/cabling problem, not media */
 		fprintf(f, "REATTACH %u  (device %s)\n", pcd.st_reattach, cur_dev);
@@ -1368,6 +1373,7 @@ int physcd_load_toc(toc_t *toc)
 	pcd.st_sync_n = pcd.st_sync_data = pcd.st_sync_audio = 0;
 	pcd.st_sync_50 = pcd.st_sync_250 = pcd.st_sync_1000 = 0;
 	pcd.st_sync_worst_ms = pcd.st_sync_total_ms = 0.0;
+	pcd.st_aud_async = 0;
 
 	pcd.leadout = lead.cdte_addr.lba;         /* unblocks prefetch    */
 
@@ -1516,7 +1522,7 @@ void physcd_seek_hint(int lba)
 
 /* shared implementation; sub_valid (optional) reports whether sub96
    actually received subchannel data rather than zeros */
-static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid)
+static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, int audio_async)
 {
 	if (sub_valid) *sub_valid = 0;
 
@@ -1566,6 +1572,29 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 		/* advance this stream's prefetch, leave the other alone */
 		if (lba >= pcd.cursor[w]) pcd.cursor[w] = lba + 1;
 		pcd.st_hit++;
+		return 0;
+	}
+
+	/* AUDIO-TRACK MISS (w==1): never block the main loop. cdda is a continuous
+	   stream and a real cd player does not freeze the machine to seek between
+	   tracks, it keeps playing with a brief gap. so serve silence THIS ONCE
+	   (never cached, like the timeout path below), point the cdda cursor here
+	   so the prefetch thread fetches it properly with its retry ladder +
+	   subchannel, and return immediately - input and osd stay live, and the
+	   fpga fifo underruns during a block anyway so audio at the seek is a wash.
+	   DATA tracks fall through to the bounded blocking read below on purpose:
+	   zeros in a data sector can corrupt a game, and cd-i fmv/voice lives in
+	   mode-2 DATA sectors, so this path never touches the authentic seek-and-
+	   settle data behaviour. audio_async is off for identify-time probes
+	   (probe_cdg) so cd+g detection still reads the disc. sync_pending is
+	   intentionally NOT set: we do no drive transaction and WANT the prefetch
+	   thread flat-out to close the gap. */
+	if (audio_async && w == 1) {
+		memset(dst, 0, PHYSCD_RAW);
+		if (sub96) memset(sub96, 0, PHYSCD_SUB);  /* sub_valid stays 0: no fabricated subcode */
+		pcd.st_miss++;         /* keep hitrate honest */
+		pcd.st_aud_async++;    /* audio silenced without blocking */
+		pcd.cursor[w] = lba;   /* prefetch re-reads from here */
 		return 0;
 	}
 
@@ -1620,13 +1649,13 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 
 int physcd_read_sector(int lba, uint8_t *dst, uint8_t *sub96)
 {
-	return read_sector_impl(lba, dst, sub96, NULL);
+	return read_sector_impl(lba, dst, sub96, NULL, 1);
 }
 
 int physcd_read_sector_sub(int lba, uint8_t *dst, uint8_t *sub96)
 {
 	int valid = 0;
-	if (read_sector_impl(lba, dst, sub96, &valid)) return 0;
+	if (read_sector_impl(lba, dst, sub96, &valid, 1)) return 0;
 	return valid;
 }
 
@@ -1678,7 +1707,12 @@ static int probe_cdg(void)
 	for (int w = 0; w < CDG_WINDOWS && hits < CDG_NEED; w++) {
 		int base = lo + (int)(((int64_t)(hi - lo) * w) / CDG_WINDOWS);
 		for (int s = 0; s < CDG_WSEC && base + s < hi; s++) {
-			if (!physcd_read_sector_sub(base + s, raw, sub)) continue;
+			/* blocking read (audio_async=0): identify MUST pull the disc, or the
+			   audio fast path would silence every probe read and every cd+g disc
+			   would misidentify as plain AUDIO. same skip-unless-valid semantics
+			   as physcd_read_sector_sub. */
+			int valid = 0;
+			if (read_sector_impl(base + s, raw, sub, &valid, 0) || !valid) continue;
 			for (int p = 0; p < PHYSCD_SUB; p += 24)
 				if ((sub[p] & 0x3F) == 9) hits++;
 		}

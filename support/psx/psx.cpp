@@ -443,6 +443,34 @@ static const char* region_string(region_t region)
 	}
 }
 
+/* PSX_MiSTer convention: the core keeps one 512KB BIOS slot per region in
+   sdram (slot = ioctl_index[7:6] of the download) and switches its cpu to
+   the slot named by the cue metadata's region bits (biosregion in PSX.sv -
+   stock core behavior, not a fork patch):
+     slot 0 = boot.rom / boot0.rom (US, and the unknown-region default)
+     slot 1 = boot1.rom (JP)
+     slot 2 = boot2.rom (EU)
+     slot 3 = cd_bios.rom (0xC0) - LATCHES cdbios in the core and pins the
+              BIOS for the whole session; never upload a fallback there */
+static const char *region_bios_file(region_t r)
+{
+	switch (r)
+	{
+		case region_t::JP: return "boot1.rom";
+		case region_t::EU: return "boot2.rom";
+		default:           return "boot.rom";
+	}
+}
+static int region_bios_slot(region_t r)
+{
+	switch (r)
+	{
+		case region_t::JP: return 1;
+		case region_t::EU: return 2;
+		default:           return 0;
+	}
+}
+
 #define BCD(v) ((uint8_t)((((v)/10) << 4) | ((v)%10)))
 
 static void send_cue_and_metadata(toc_t *table, uint16_t libcrypt_mask, enum region_t region, int reset)
@@ -753,11 +781,85 @@ static void mount_cd(int size, int index)
 	user_io_bufferinvalidate(1);
 }
 
-static int load_bios(const char* filename)
+static int load_bios(const char* filename, unsigned char index = 0xC0)
 {
 	int sz = FileLoad(filename, 0, 0);
 	if (sz != 512 * 1024) return 0;
-	return user_io_file_tx(filename, 0xC0);
+	return user_io_file_tx(filename, index);
+}
+
+/* auto-BIOS safety net (phys only). user_io_init already uploaded every
+   bootN.rom that exists while the core was held in reset, and the core
+   selects the slot itself from the region we send with the cue - so with
+   all three files present, regional auto-BIOS already just works. what
+   this guards is the MISSING-file case: the core would switch to an empty
+   sdram slot and hang on a black screen. so make sure the slot the core is
+   ABOUT to switch to holds a real BIOS, by uploading the best one that
+   does exist INTO THAT SLOT. a bios upload asserts the core reset line for
+   the tx, so this must run BEFORE send_cue_and_metadata - the metadata's
+   own reset bit then boots the freshly filled slot exactly once. */
+static void psx_phys_autobios(region_t region)
+{
+	static bool filled[3] = {};   /* backfilled this core session */
+
+	/* an OSD-forced Region forces the core's slot regardless of the
+	   disc (status[40:39]: 1=NTSC-U, 2=NTSC-J, 3=PAL), so guard the
+	   slot the core will actually use */
+	uint32_t forced = user_io_status_get("[40:39]");
+	if      (forced == 1) region = region_t::US;
+	else if (forced == 2) region = region_t::JP;
+	else if (forced == 3) region = region_t::EU;
+
+	int slot = region_bios_slot(region);
+	const char *want = region_bios_file(region);
+	char path[1024];
+
+	FILE *dl = fopen("/tmp/physcd_psx.log", "a");
+
+	/* present? slot 0 is fed by EITHER boot.rom or boot0.rom in the
+	   framework's boot loop, so accept both - overwriting a valid
+	   boot0.rom with a foreign fallback would be a regression */
+	int present = 0;
+	snprintf(path, sizeof(path), "%s/%s", HomeDir(), want);
+	if (FileLoad(path, 0, 0) == 512 * 1024) present = 1;
+	if (!present && slot == 0)
+	{
+		snprintf(path, sizeof(path), "%s/boot0.rom", HomeDir());
+		if (FileLoad(path, 0, 0) == 512 * 1024) present = 1;
+	}
+	if (present)
+	{
+		if (dl) { fprintf(dl, "autobios: %s disc -> slot %d bios present\n",
+			region_string(region), slot); fclose(dl); }
+		return;   /* the boot flow already put it in the slot */
+	}
+
+	if (filled[slot])
+	{
+		if (dl) { fprintf(dl, "autobios: slot %d already backfilled\n", slot); fclose(dl); }
+		return;   /* every re-upload is a core reset - do it once */
+	}
+
+	static const char *ladder[] = { "boot.rom", "boot0.rom", "boot1.rom", "boot2.rom" };
+	for (const char *alt : ladder)
+	{
+		if (!strcmp(alt, want)) continue;
+		snprintf(path, sizeof(path), "%s/%s", HomeDir(), alt);
+		if (load_bios(path, (unsigned char)(slot << 6)))
+		{
+			filled[slot] = true;
+			printf("PSX: %s missing - loaded %s for the %s disc instead\n",
+				want, alt, region_string(region));
+			if (dl) fprintf(dl, "autobios: %s missing - %s uploaded into slot %d\n",
+				want, alt, slot);
+			break;
+		}
+	}
+	if (!filled[slot] && dl)
+		fprintf(dl, "autobios: no usable 512K BIOS in %s for a %s disc - "
+			"core boots whatever slot %d holds\n",
+			HomeDir(), region_string(region), slot);
+	if (dl) fclose(dl);
 }
 
 int psx_mount_cd(int f_index, int s_index, const char *filename)
@@ -781,6 +883,7 @@ int psx_mount_cd(int f_index, int s_index, const char *filename)
 				region = game_info.region;
 			printf("Game ID: %s, region: %s\n", game_id, region_string(region));
 			if (phys) s_swap_region = region;   // reused by a later disc swap
+			if (phys) psx_phys_autobios(region);   // fill the slot the core will switch to
 
 			/* region and game id come from the disc itself, so they
 			   work on a physical mount with no extra plumbing. the
@@ -944,17 +1047,36 @@ static void psx_swap_apply()
 	game_info_t gi = psx_get_game_info();
 	int newgame = gi.game_id[0] && strcmp(gi.game_id, s_card_id);
 	region_t region = s_swap_region;
+	int reset = 0;
 	if (newgame)
 	{
 		region_t r = psx_get_region();
 		if (r == region_t::UNKNOWN) r = gi.region;   /* prefix fallback, like mount */
-		if (r != region_t::UNKNOWN) { region = r; s_swap_region = r; }
+		if (r != region_t::UNKNOWN)
+		{
+			/* a different-REGION game is a full context change: the core's
+			   biosregion follows the announced region live, so without a
+			   reset the running game would have its BIOS ROM swapped out
+			   from under it (or pointed at an empty slot) and isPal would
+			   flip mid-frame. so: fill the new region's slot if needed,
+			   then reset into it. same-region swaps (multi-disc sets,
+			   reinserts, a music cd in vib ribbon) keep reset clear and
+			   stay seamless, exactly as before. */
+			if (r != region)
+			{
+				psx_phys_autobios(r);
+				reset = 1;
+			}
+			region = r; s_swap_region = r;
+		}
 	}
 
-	// SWAP: reset bit CLEAR so the game keeps going. libcrypt mask 0 is
-	// fine for the multi-disc rpgs this serves (FF etc).
-	printf("PSX: disc swap -> region %s\n", region_string(region));
-	send_cue_and_metadata(&toc, 0, region, 0);
+	// SWAP: reset bit clear so the game keeps going - except a region
+	// flip, which reboots into the new region's BIOS (see above).
+	// libcrypt mask 0 is fine for the multi-disc rpgs this serves (FF etc).
+	printf("PSX: disc swap -> region %s%s\n", region_string(region),
+		reset ? " (reset: region change)" : "");
+	send_cue_and_metadata(&toc, 0, region, reset);
 	user_io_set_index(s_swap_fidx);
 	mount_cd(toc.end * CD_SECTOR_LEN, s_swap_sidx);
 
@@ -978,8 +1100,8 @@ static void psx_swap_apply()
 	   quick cat can pin which gate fired. append-mode: one mount session
 	   is a handful of lines. */
 	FILE *dl = fopen("/tmp/physcd_psx.log", "a");
-	if (dl) fprintf(dl, "swap: id='%s' card='%s' region=%s automount_off=%u\n",
-		gi.game_id, s_card_id, region_string(region), auto_off);
+	if (dl) fprintf(dl, "swap: id='%s' card='%s' region=%s reset=%d automount_off=%u\n",
+		gi.game_id, s_card_id, region_string(region), reset, auto_off);
 
 	if (!gi.game_id[0])
 	{

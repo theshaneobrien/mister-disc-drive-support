@@ -30,7 +30,8 @@
 
 // ---------------------------------------------------------------- state
 
-#define CACHE_SECTORS 8192            /* 8192 * 2448B ~= 19MB (Tier1: 2x history) */
+#define CACHE_SECTORS 8192            /* 8192 * 2448B ~= 19MB: 2x history depth so
+                                         loops / backward seeks stay cached */
 #define NWIN 2                        /* one window per stream          */
 #define WIN_SECTORS (CACHE_SECTORS / NWIN)
 #define SLOT_SIZE (PHYSCD_RAW + PHYSCD_SUB)
@@ -66,8 +67,14 @@
                                     the prefetch close the gap (a pack run is
                                     only at risk beyond the cap). audio fills
                                     skip the subchannel-reject retry, so this
-                                    IS the worst single audio freeze. */
+                                    bounds the FILL itself; a miss can still
+                                    queue behind one in-flight background
+                                    transaction (<= BG timeout) on pcd.io
+                                    before its own fill starts. */
 #define BG_TIMEOUT_MS 3000
+
+/* fill_cache sync modes */
+enum { FILL_BG = 0, FILL_SYNC_DATA = 1, FILL_SYNC_AUDIO = 2 };
 
 /*
  * drive speed cap.
@@ -184,24 +191,36 @@ static struct {
 	uint32_t st_form_bad;         /* malformed structure (sync/mode/subheader) */
 	uint32_t st_edc_logged;       /* log cap, mirrors st_bad_logged */
 	int st_edc_last_lba;          /* -1 = none */
-	/* sync-stall telemetry (Tier 0): the inline fill_cache on a consumer
-	   cache miss blocks the fpga-answering thread. cumulative per mount like
-	   st_bad; written on the miss path (read_sector_impl), read on the
-	   prefetch thread in stats_report - the accepted telemetry race above. */
-	uint32_t st_sync_n;           /* consumer sync fills measured         */
-	uint32_t st_sync_data;        /* ...on a data track                   */
+	/* sync-stall telemetry: the inline fill_cache on a consumer cache miss
+	   blocks the fpga-answering thread. cumulative per mount like st_bad;
+	   written on the miss path (read_sector_impl), read on the prefetch
+	   thread in stats_report - the accepted telemetry race above. */
+	uint32_t st_sync_data;        /* consumer sync fills on a data track  */
 	uint32_t st_sync_audio;       /* ...on an audio track                 */
 	uint32_t st_sync_50;          /* ...that blocked  >50 ms              */
 	uint32_t st_sync_250;         /* ...that blocked >250 ms              */
 	uint32_t st_sync_1000;        /* ...that blocked  >1 s                */
 	double   st_sync_worst_ms;    /* worst single inline fill, cumulative */
 	double   st_sync_total_ms;    /* summed inline blocked time           */
-	uint32_t st_aud_async;        /* audio misses that blew the short cap and were silenced */
+	uint32_t st_aud_overcap;      /* audio misses that blew the short cap and were silenced */
+	/* subchannel health: the paths that can silently degrade cd+g. per-drive
+	   latch + per-mount counters (see the SUB stats line). */
+	int sub_burst_ok;             /* a multi-sector with-sub burst has succeeded on
+	                                 this drive: the bridge-reject probe can never
+	                                 fire again (a timeout can masquerade as a
+	                                 rejection and kill subchannel session-wide).
+	                                 per-DRIVE: reset on open/reattach, NOT per mount */
+	uint32_t st_sub_lost;         /* audio sectors stamped sub-less by the retry
+	                                 ladder while subchannel was supposedly on */
+	uint32_t st_subless_served;   /* audio-window hits served to a sub-wanting
+	                                 consumer with has_sub=0: packs actually lost */
+	uint32_t st_keepalive;        /* idle keepalive pokes fired this mount */
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
 	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0,
 	  0, 0, 0, 0, -1,
-	  0, 0, 0, 0, 0, 0, 0.0, 0.0, 0 };
+	  0, 0, 0, 0, 0, 0.0, 0.0, 0,
+	  0, 0, 0, 0 };
 
 /* "a swap happened during this mount" must survive the core-exit exec (the
    menu runs in a FRESH process - fpga_load_rbf execs; see physcd_autoboot.h,
@@ -609,17 +628,15 @@ static int fill_cache(int lba, int count, int sync)
 	/* one transaction at a time: a synchronous miss and the prefetch
 	   thread issuing concurrent reads just makes the head seesaw and
 	   both take longer than they would serialized */
-	/* sync==1 consumer data miss (3s), sync==2 consumer AUDIO miss (short
-	   cap - see AUD_SYNC_TIMEOUT_MS), sync==0 background (blocking free) */
-	int tmo = (sync == 2) ? AUD_SYNC_TIMEOUT_MS
-	        : sync       ? SYNC_TIMEOUT_MS : BG_TIMEOUT_MS;
+	int tmo = (sync == FILL_SYNC_AUDIO) ? AUD_SYNC_TIMEOUT_MS
+	        : sync                      ? SYNC_TIMEOUT_MS : BG_TIMEOUT_MS;
 
 	double io0 = now_ms();
 	pthread_mutex_lock(&pcd.io);
 	int r = sg_read_cd(lba, count, flags, with_sub, burst, tmo);
 	pthread_mutex_unlock(&pcd.io);
 
-	if (r && with_sub && count > 1 && sync != 2) {
+	if (r && with_sub && count > 1 && sync != FILL_SYNC_AUDIO && !pcd.sub_burst_ok) {
 		/* the subchannel probe only ever reads ONE sector, and some
 		   usb bridges accept that but reject a multi-sector transfer
 		   with subchannel appended - which would fail every burst.
@@ -629,13 +646,20 @@ static int fill_cache(int lba, int count, int sync)
 		   a bridge every sync fill would otherwise fail forever, and
 		   the cost here is one extra attempt exactly once, because
 		   success disables subchannel session-wide.
-		   NEVER on a short-cap audio fill (sync==2): there a timeout is
-		   the designed-for regime, and the fast-succeeding plain retry
+		   NEVER on a short-cap audio fill: there a timeout is the
+		   designed-for regime, and the fast-succeeding plain retry
 		   (the drive finishes the aborted read internally) would look
 		   exactly like a bridge rejection and switch subchannel off for
 		   the whole session - killing cd+g, the very thing the short cap
-		   protects. an over-cap audio miss just bails to silence-once;
-		   the background and data paths keep the probe. */
+		   protects. an over-cap audio miss just bails to silence-once.
+		   NEVER once sub_burst_ok is latched: bridge incompatibility is
+		   a static property that shows on the FIRST with-sub burst, so
+		   after one success any later failure is a transient (slow wake,
+		   marginal sector) doing the same masquerade - a single 3s
+		   background timeout must not silently kill cd+g mid-session.
+		   the latch is per-drive (reset on open/reattach, not per mount),
+		   so a genuinely incompatible bridge never latches and keeps
+		   this escape hatch. */
 		pthread_mutex_lock(&pcd.io);
 		int r2 = sg_read_cd(lba, count, flags, 0, burst, tmo);
 		pthread_mutex_unlock(&pcd.io);
@@ -708,6 +732,12 @@ static int fill_cache(int lba, int count, int sync)
 			}
 			memset(s->data + PHYSCD_RAW, 0, PHYSCD_SUB);
 			s->has_sub = 0;
+			/* an audio sector that SHOULD have carried subchannel got
+			   stamped without it: its cd+g packs are silently gone (the
+			   consumer sees a clean hit with sub_valid=0). count it -
+			   this is the invisible mechanism behind karaoke word gaps
+			   that move no other counter. */
+			if (with_sub && flags == 0x10) pcd.st_sub_lost++;
 			s->lba = lba + i;
 			pthread_mutex_unlock(&pcd.lock);
 		}
@@ -720,6 +750,10 @@ static int fill_cache(int lba, int count, int sync)
 	if (d > pcd.st_worst_io_ms) pcd.st_worst_io_ms = d;
 
 	pcd.consec_fail = 0;          /* a clean burst: the drive is there */
+
+	/* multi-sector with-sub proven on this drive: the bridge-reject probe
+	   above is disarmed for the rest of this drive's lifetime */
+	if (with_sub && count > 1) pcd.sub_burst_ok = 1;
 
 	int sector_len = PHYSCD_RAW + (with_sub ? PHYSCD_SUB : 0);
 
@@ -754,30 +788,41 @@ static void stats_report()
 			pcd.st_hit, pcd.st_miss,
 			(pcd.st_hit + pcd.st_miss) ? 100.0 * pcd.st_hit / (pcd.st_hit + pcd.st_miss) : 0.0,
 			pcd.st_worst_ms);
-		/* BAD is the number that matters on an aging disc: those
-		   sectors were served to the core as zeros and counted as
-		   hits. nonzero here means the disc, not the cache. */
-		fprintf(f, "BAD %u sectors served as zeros  worst drive io %.0f ms\n",
+		/* BAD = sectors served as zeros: mostly a rotting disc, but a
+		   transient data-miss timeout lands here too (the prefetch then
+		   repairs the slot moments later). persistent growth means the
+		   disc; a lone blip means a hiccup. */
+		fprintf(f, "BAD %u sectors served as zeros  worst drive io %.0f ms  (mount)\n",
 			pcd.st_bad, pcd.st_worst_io_ms);
 		/* EDC bad = the drive returned bytes that fail the sector's own
-		   checksum: a misread served AS-IS (unlike BAD, which is zeros).
-		   cumulative per mount, like BAD. */
-		fprintf(f, "EDC bad %u / %u checked  malformed %u  last bad lba %d\n",
+		   checksum: a misread served AS-IS (unlike BAD, which is zeros). */
+		fprintf(f, "EDC bad %u / %u checked  malformed %u  last bad lba %d  (mount)\n",
 			pcd.st_edc_bad, pcd.st_edc_checked, pcd.st_form_bad, pcd.st_edc_last_lba);
 		/* SYNC stall = the inline fill_cache on a consumer cache miss, which
 		   freezes the fpga-answering thread (input + osd) until it returns.
-		   cumulative per mount like BAD/EDC. data misses cap at 3s, audio
-		   misses at the short AUD_SYNC cap - so audio worst should sit well
-		   under a second here. */
-		fprintf(f, "SYNC stall n %u (data %u audio %u)  >50ms %u  >250ms %u  >1s %u  worst %.0f ms  total %.0f ms\n",
-			pcd.st_sync_n, pcd.st_sync_data, pcd.st_sync_audio,
+		   data misses cap at 3s, audio at the short AUD_SYNC cap. worst is
+		   shared across both types and includes any pcd.io mutex wait, so
+		   it reports what the core FELT. these lines are cumulative per
+		   mount, unlike the interval hit/miss line above. */
+		fprintf(f, "SYNC stall n %u (data %u audio %u)  >50ms %u  >250ms %u  >1s %u  worst %.0f ms  total %.0f ms  (mount)\n",
+			pcd.st_sync_data + pcd.st_sync_audio, pcd.st_sync_data, pcd.st_sync_audio,
 			pcd.st_sync_50, pcd.st_sync_250, pcd.st_sync_1000,
 			pcd.st_sync_worst_ms, pcd.st_sync_total_ms);
-		/* audio misses that blew the short cap and were served as one
-		   sector of silence (dropping that sector's cd+g packs). ~0 on a
-		   healthy drive; climbing steadily means the cap is too short for
-		   this drive. */
-		fprintf(f, "audio over-cap silenced %u sectors\n", pcd.st_aud_async);
+		/* audio misses that blew the short cap and were served as silence
+		   (dropping their cd+g packs). ~0 on a healthy drive; climbing
+		   steadily means the cap is too short for this drive. events, not
+		   sectors: megacd reads each lba twice, so one sector can count
+		   two events. */
+		fprintf(f, "audio over-cap silenced %u events  (mount)\n", pcd.st_aud_overcap);
+		/* subchannel health: subok flipping to no mid-session means the
+		   bridge-reject probe fired (cd+g dead until remount). ladder-lost
+		   = audio sectors cached sub-less after burst failures;
+		   subless-served = those actually reaching a sub-wanting consumer
+		   (real dropped packs, the invisible karaoke-gap mechanism);
+		   keepalive = idle pokes fired. */
+		fprintf(f, "SUB subok %s  ladder-lost %u  subless-served %u  keepalive %u  (mount)\n",
+			pcd.sub_ok == 1 ? "yes" : pcd.sub_ok == 0 ? "no" : "unknown",
+			pcd.st_sub_lost, pcd.st_subless_served, pcd.st_keepalive);
 		/* nonzero REATTACH means the drive dropped off the usb bus and
 		   was recovered - that is a power/cabling problem, not media */
 		fprintf(f, "REATTACH %u  (device %s)\n", pcd.st_reattach, cur_dev);
@@ -826,6 +871,7 @@ static void try_reattach(void)
 		snprintf(cur_dev, 64, "%s", newdev);
 		pcd.st_reattach++;
 		pcd.consec_fail = 0;
+		pcd.sub_burst_ok = 0;   /* re-enumerated: re-prove bridge capability */
 		quiet_block_probes(cur_dev);   /* a re-enumerated device gets fresh queue defaults */
 		set_speed_cap();
 		printf("physcd: drive re-attached as %s (recovered from a usb reset)\n", newdev);
@@ -1114,6 +1160,7 @@ static void *prefetch_thread(void *arg)
 				pthread_mutex_lock(&pcd.io);
 				sg_read_cd(klba, 1, fl, 0, sc, BG_TIMEOUT_MS);
 				pthread_mutex_unlock(&pcd.io);
+				pcd.st_keepalive++;
 				last_io = now_ms();
 			}
 
@@ -1199,6 +1246,7 @@ int physcd_open(const char *dev)
 	pcd.leadout = 0;
 	pcd.ntrk = 0;
 	pcd.sub_ok = -1;
+	pcd.sub_burst_ok = 0;         /* fresh drive: bridge capability unknown */
 	for (int w = 0; w < NWIN; w++) { pcd.cursor[w] = 0; pcd.wactive[w] = 0; }
 	pcd.last_win = -1;
 	pcd.prewarm = -1;
@@ -1381,10 +1429,14 @@ int physcd_load_toc(toc_t *toc)
 	pcd.st_edc_checked = pcd.st_edc_bad = pcd.st_form_bad = pcd.st_edc_logged = 0;
 	pcd.st_edc_last_lba = -1;
 	pcd.st_worst_ms = pcd.st_worst_io_ms = 0.0;
-	pcd.st_sync_n = pcd.st_sync_data = pcd.st_sync_audio = 0;
+	pcd.st_sync_data = pcd.st_sync_audio = 0;
 	pcd.st_sync_50 = pcd.st_sync_250 = pcd.st_sync_1000 = 0;
 	pcd.st_sync_worst_ms = pcd.st_sync_total_ms = 0.0;
-	pcd.st_aud_async = 0;
+	pcd.st_aud_overcap = 0;
+	pcd.st_sub_lost = pcd.st_subless_served = pcd.st_keepalive = 0;
+	/* sub_burst_ok deliberately NOT reset here: it is a property of the
+	   DRIVE/bridge, not the disc, and must survive swaps so the swap-wake
+	   fills are protected. reset lives in physcd_open / try_reattach. */
 
 	pcd.leadout = lead.cdte_addr.lba;         /* unblocks prefetch    */
 
@@ -1533,7 +1585,7 @@ void physcd_seek_hint(int lba)
 
 /* shared implementation; sub_valid (optional) reports whether sub96
    actually received subchannel data rather than zeros */
-static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, int audio_async)
+static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_valid, int allow_short_cap)
 {
 	if (sub_valid) *sub_valid = 0;
 
@@ -1559,6 +1611,11 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 		memcpy(dst, s->data, PHYSCD_RAW);
 		if (sub96) memcpy(sub96, s->data + PHYSCD_RAW, PHYSCD_SUB);
 		if (sub_valid) *sub_valid = s->has_sub;
+		/* a sub-wanting consumer got an audio sector without subchannel
+		   while subchannel is nominally on: its packs are lost. this is
+		   the ladder / cold-prewarm output actually REACHING the core. */
+		if (sub96 && w == 1 && pcd.sub_ok == 1 && !s->has_sub)
+			pcd.st_subless_served++;
 	}
 	pthread_mutex_unlock(&pcd.lock);
 
@@ -1570,27 +1627,29 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 	}
 
 	/* cache miss: bounded synchronous fill, then serve. an AUDIO miss
-	   (w==1, audio_async) uses the SHORT cap: cd+g packs are a stateful
+	   (w==1, allow_short_cap) uses the SHORT cap: cd+g packs are a stateful
 	   stream riding the audio subchannel, so instant silence permanently
 	   drops packs (missing karaoke words, un-cleared pages - seen on
 	   hardware). a short real fill delivers data+sub intact for every
 	   stall class ever measured (worst 410ms < 600 cap) while capping the
 	   freeze well under the data path's 3s. past the cap it falls through
-	   to silence-once below, same as before. audio_async is off for
+	   to silence-once below, same as before. allow_short_cap is off for
 	   identify-time probes (probe_cdg), which keep the full data cap. */
 	double t0 = now_ms();
 	pcd.sync_pending++;
-	int fr = fill_cache(lba, SYNC_BURST, (w == 1 && audio_async) ? 2 : 1);
+	int fr = fill_cache(lba, SYNC_BURST,
+		(w == 1 && allow_short_cap) ? FILL_SYNC_AUDIO : FILL_SYNC_DATA);
 	pcd.sync_pending--;
 
 	pcd.st_miss++;
 	double d = now_ms() - t0;
 	if (d > pcd.st_worst_ms) pcd.st_worst_ms = d;
 
-	/* sync-stall telemetry (Tier 0 baseline): characterize the inline fill
-	   that just froze this thread. w is the track type (win_of, above); d is
-	   already computed - no added syscalls, and this is past the hit return. */
-	pcd.st_sync_n++;
+	/* sync-stall telemetry: characterize the inline fill that just froze
+	   this thread. w is the track type (win_of, above); d is already
+	   computed - no added syscalls, and this is past the hit return. note
+	   d includes any pcd.io mutex wait, so it reports what the core FELT,
+	   not just the drive transaction. */
 	if (w == 1) pcd.st_sync_audio++; else pcd.st_sync_data++;
 	pcd.st_sync_total_ms += d;
 	if (d > pcd.st_sync_worst_ms) pcd.st_sync_worst_ms = d;
@@ -1606,6 +1665,8 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 			memcpy(dst, s->data, PHYSCD_RAW);
 			if (sub96) memcpy(sub96, s->data + PHYSCD_RAW, PHYSCD_SUB);
 			if (sub_valid) *sub_valid = s->has_sub;
+			if (sub96 && w == 1 && pcd.sub_ok == 1 && !s->has_sub)
+				pcd.st_subless_served++;
 		}
 		pthread_mutex_unlock(&pcd.lock);
 
@@ -1623,7 +1684,7 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 	   not a rotting-disc signal, so it must not inflate BAD. */
 	memset(dst, 0, PHYSCD_RAW);
 	if (sub96) memset(sub96, 0, PHYSCD_SUB);
-	if (w == 1 && audio_async) pcd.st_aud_async++;
+	if (w == 1 && allow_short_cap) pcd.st_aud_overcap++;
 	else pcd.st_bad++;
 	pcd.cursor[w] = lba;
 	return 0;
@@ -1689,10 +1750,10 @@ static int probe_cdg(void)
 	for (int w = 0; w < CDG_WINDOWS && hits < CDG_NEED; w++) {
 		int base = lo + (int)(((int64_t)(hi - lo) * w) / CDG_WINDOWS);
 		for (int s = 0; s < CDG_WSEC && base + s < hi; s++) {
-			/* blocking read (audio_async=0): identify MUST pull the disc, or the
-			   audio fast path would silence every probe read and every cd+g disc
-			   would misidentify as plain AUDIO. same skip-unless-valid semantics
-			   as physcd_read_sector_sub. */
+			/* full-cap blocking read (allow_short_cap=0): identify MUST pull the
+			   disc with the same patience as a data read - a short-cap bail here
+			   could misidentify a cd+g disc as plain AUDIO. same skip-unless-valid
+			   semantics as physcd_read_sector_sub. */
 			int valid = 0;
 			if (read_sector_impl(base + s, raw, sub, &valid, 0) || !valid) continue;
 			for (int p = 0; p < PHYSCD_SUB; p += 24)

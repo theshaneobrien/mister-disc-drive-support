@@ -61,11 +61,11 @@ On BIOS files, I did not touch any of mine, it all just worked through MiSTer Co
 A disc and the console BIOS have to agree on region or a game refuses to boot or runs at the wrong speed. Per core:
 
 * Saturn: set the core's Region option to Auto in its OSD menu, it reads the region off the disc. One boot.rom.
-* PlayStation: set the core Region to Auto too. The fork reads the region off the disc and sends it to the core, so on Auto it boots PAL, NTSC-U, and NTSC-J with nothing to set. A fixed region overrides that and makes a PAL disc stutter on a US setting, so leave it on Auto.
+* PlayStation: name the BIOS files the PSX core's own way, all in games/PSX/: boot.rom = US, boot1.rom = JP, boot2.rom = EU, and keep the core's Region on Auto. The core holds one BIOS per region and the fork points it at the one the disc in the drive asks for, so US, JP, and EU discs each boot on their own BIOS with nothing to set. Missing one? The closest BIOS you do have stands in for it (noted in /tmp/physcd_psx.log) and the game still boots, just on a foreign BIOS. A fixed Region forces both the timing and the BIOS and makes a PAL disc stutter on a US setting, so leave it on Auto.
 * NeoGeo CD: a Unibios is region free, so nothing to set. Otherwise the core's system type (CD or CDZ) has to match your BIOS.
 * MegaCD: the BIOS is the region. Drop boot_EU.rom, boot_US.rom, and boot_JP.rom in the MegaCD home folder and the matching one loads. A plain boot.rom is the catch all. Some setups also have an Auto region option, try that first.
 
-Short version: use Auto where a core has it, otherwise provide the region named BIOS files above. Each CD core needs its own BIOS in its home folder, same as for a ripped image.
+Short version: use Auto where a core has it, and provide the region named BIOS files using each core's OWN naming (PlayStation and MegaCD name theirs differently, see above). Each CD core needs its own BIOS in its home folder, same as for a ripped image.
 
 ## Using it
 

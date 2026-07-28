@@ -4,6 +4,8 @@ Load almost any CD game on a MiSTer straight from a USB CD or DVD drive, no ripp
 
 This is a fork of Main_MiSTer, the ARM/Linux side of MiSTer. All the work is in userspace, the FPGA never touches the drive, and the disc build leaves the cores stock. The ARM binary just answers the core's sector requests from the real disc instead of from a file on the SD card.
 
+*The disc backend that powers other CD loaders.*
+
 ## Features
 
 * Play CD games straight from a USB drive, no ripping: MegaCD, PlayStation, Saturn, NeoGeo CD, 3DO, TurboGrafx-CD, and CD-i.

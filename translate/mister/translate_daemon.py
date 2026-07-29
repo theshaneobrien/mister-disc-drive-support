@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MiSTer AI-translation PoC daemon (milestones 4+).
+"""MiSTer on-the-fly translation daemon.
 
 Captures the current core frame straight from the scaler buffer in DDR3
 (passive mmap - the core is untouched), and translates it via one of two
@@ -20,14 +20,15 @@ backends, both usable WITHOUT self-hosting anything:
                       calls + 500k translated chars/month).
 
 Replies route through Main's FIFO verbs: text -> osd_msg (live game),
-image -> overlay_show /tmp/translated.png (freeze-frame).
+image -> overlay_show of a rotating /tmp/translated_N.png (freeze-frame).
 
-Runs on the stock MiSTer rootfs python3, stdlib only, as root.
+Runs on the stock MiSTer rootfs python3, stdlib only, as root. Settings
+come from translate.ini (see --config); CLI args override it.
 
 Usage:
+    python3 translate_daemon.py                  # settings from translate.ini
     python3 translate_daemon.py --server http://<pc>:4404 &
-    python3 translate_daemon.py --backend google --google-key AIza... &
-    echo image > /tmp/translate_cmd     # or: text / go / hide / quit
+    echo image > /tmp/translate_cmd   # or: text/go/hide/pause/resume/quit
 
 Timings land in /tmp/overlay_perf.log on the same monotonic timebase as
 Main's telemetry.

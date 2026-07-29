@@ -28,6 +28,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: disc
+      - name: Check out the wrapper (SD payload lives on main)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: wrapper
 
       - name: Install the ARM toolchain and build deps
         run: |
@@ -35,7 +40,7 @@ jobs:
           SUDO=$(command -v sudo || true)
           $SUDO apt-get update
           $SUDO apt-get install -y --no-install-recommends \
-            wget xz-utils make rsync ca-certificates
+            wget xz-utils make rsync ca-certificates zip
           GCC_VER=10.2-2020.11
           wget -q --no-check-certificate \
             "https://developer.arm.com/-/media/Files/downloads/gnu-a/${GCC_VER}/binrel/gcc-arm-${GCC_VER}-x86_64-arm-none-linux-gnueabihf.tar.xz" \
@@ -51,6 +56,20 @@ jobs:
           make -C disc -j"$(nproc)"
           cp disc/bin/MiSTer MiSTer-disc-overlaypoc
           ls -l MiSTer-disc-overlaypoc
+
+      - name: Assemble the SD install zip
+        run: |
+          set -eu
+          # zip is laid out relative to the SD ROOT: extract onto the card
+          # and everything lands where the feature expects it
+          mkdir -p sd/translate sd/Scripts
+          cp wrapper/translate/mister/translate_daemon.py sd/translate/
+          cp wrapper/translate/mister/translate_start.sh  sd/translate/
+          cp wrapper/translate/mister/translate.ini       sd/translate/
+          cp wrapper/translate/README.md                  sd/translate/
+          cp wrapper/translate/Scripts/SetTranslateHotkey.sh sd/Scripts/
+          (cd sd && zip -r ../MiSTer-translate-install.zip .)
+          unzip -l MiSTer-translate-install.zip
 
       - name: Attach to the Gitea release
         if: startsWith(github.ref, 'refs/tags/')
@@ -76,4 +95,7 @@ jobs:
           curl -fsS -X POST -H "Authorization: token $TOKEN" \
             -F "attachment=@MiSTer-disc-overlaypoc;type=application/octet-stream" \
             "$API/releases/$ID/assets?name=MiSTer-disc-overlaypoc"
-          echo "Attached MiSTer-disc-overlaypoc to release $TAG."
+          curl -fsS -X POST -H "Authorization: token $TOKEN" \
+            -F "attachment=@MiSTer-translate-install.zip;type=application/zip" \
+            "$API/releases/$ID/assets?name=MiSTer-translate-install.zip"
+          echo "Attached MiSTer-disc-overlaypoc + MiSTer-translate-install.zip to release $TAG."

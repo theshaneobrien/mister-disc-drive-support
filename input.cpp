@@ -3011,7 +3011,13 @@ static void overlay_hotkey(struct input_event *ev)
 			if (ev->value == 1)
 			{
 				held[idx] = 1;
-				if (held[0] && (held[1] || !hk[1]) && !user_io_osd_is_visible())
+				// fire only over live gameplay (or over our own overlay =
+				// re-translate). Not with the OSD open, not in the menu
+				// core, not on the F9/scripts terminal (bank-0 fb) - a
+				// hotkey press while SetTranslateHotkey listens fired a
+				// real translation of the script terminal (HTTP 500s).
+				if (held[0] && (held[1] || !hk[1]) && !user_io_osd_is_visible() &&
+					!is_menu() && (!video_fb_state() || video_overlay_state()))
 				{
 					held[0] = held[1] = 0; // re-fire needs fresh presses
 					int fd = open("/tmp/translate_cmd", O_WRONLY | O_NONBLOCK | O_CLOEXEC);

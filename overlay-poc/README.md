@@ -112,9 +112,45 @@ tail -f /tmp/overlay_perf.log
 - Test pattern doubles as a pixel-format check: bar order white → black as
   listed in the script; red/blue swap on screen = RxB assumption wrong.
 
+## Milestone 4 — the server loop (v3)
+
+`translate_daemon.py` (runs on the MiSTer, stdlib-only python3) captures the
+frame **itself** from the scaler DDR3 buffer (no Main involvement, ~no PNG/SD),
+POSTs it RetroArch-AI-Service-style, and routes the reply: `text` → `osd_msg`
+over the live game, `image` → `overlay_show /tmp/translated.png` freeze-frame.
+`mock_server.py` (runs on any PC, port 4404 = vgtranslate's default) answers
+the protocol with a canned translation — swap the URL for a real
+vgtranslate/ztranslate later and nothing else changes.
+
+Quickstart:
+
+```bash
+# on the PC:
+python3 mock_server.py                  # pip install pillow for drawn image mode
+
+# on the MiSTer (game core running):
+python3 /media/fat/overlay/translate_daemon.py --server http://<pc-ip>:4404 &
+echo image > /tmp/translate_cmd         # freeze-frame with mock translation bar
+echo text  > /tmp/translate_cmd         # OSD text over the live game
+echo hide  > /tmp/translate_cmd
+```
+
+One-shot form (no daemon): `python3 translate_daemon.py --server http://<pc>:4404 --once --mode text`
+
+Coordinate story (v3): `overlay_show`/`overlay_shot` now letterbox into the
+scaler's TRUE output rect (from the same DDR3 header), so freeze-frames land
+pixel-on-pixel over the live picture instead of stretching to full screen,
+and OCR coords in capture space map linearly to fb space. Anamorphic hi-res
+modes (SNES 512×224) get row-doubled before upload so OCR sees sane glyph
+proportions. OSD `-x/-y` are pre-scale-domain units — calibratable, but
+character-cell-approximate; when placement must be exact, image mode is the
+tool. Multiple simultaneous OSD messages: stock = one info window (a second
+`Info()` replaces the first); the window is a 32×16-char canvas that could
+host multiple text blocks, but the FPGA tints the whole window blue — for
+RPG-menu-style scattered labels, image mode is the right answer.
+
 ## Next milestones (not in this branch)
 
-3. daemon + lifecycle (timeout auto-hide, show-while-fresh)
-4. POST frame to a vgtranslate/ztranslate-compatible server; text → `osd_msg`,
-   image → `overlay_show` (skip PNG/SD: encode from RAM, decode to bank 1)
-5. controller hotkey (evdev grab question) replacing the SSH trigger
+5. controller hotkey (evdev grab question) replacing the SSH/FIFO trigger
+6. real server: vgtranslate (Google Vision+Translate keys) or an
+   Interpreter-style offline stack (manga-ocr + Sugoi) on the LAN PC

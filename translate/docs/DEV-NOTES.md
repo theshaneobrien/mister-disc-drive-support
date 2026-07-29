@@ -255,3 +255,7 @@ Behavior, by design:
    basename detection); the overlay binary could ship the same way
 9. google backend A/B (Vision may crack the stylized fonts ztranslate
    declines; exercises OSD text mode + smart placement)
+10. MultiDatabases distribution (after 8): the disc project's entry at
+    theypsilon/MultiDatabases_MiSTer/physical-disc is the template —
+    the downloader natively distributes file trees shaped like our
+    install zip, and the binary ships as a side-by-side alternate main

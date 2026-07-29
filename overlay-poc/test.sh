@@ -2,11 +2,11 @@
 # Overlay PoC driver - exercises milestones 0/1/2 against a RUNNING GAME CORE.
 #
 # Run ON the MiSTer:   ssh root@<mister> 'bash -s' < overlay-poc/test.sh
-# or copy to /media/fat/Scripts and run from a shell (not the OSD Scripts
+# or copy anywhere on the MiSTer and run from a shell (not the OSD Scripts
 # menu - that menu takes over the framebuffer we're testing).
 #
-# Prereqs: a game core running (NOT the menu core), overlay-poc build of
-# /media/fat/MiSTer. Telemetry lands in /tmp/overlay_perf.log.
+# Needs the overlaypoc2+ build for the overlay_shot section (older builds
+# silently ignore unknown verbs). Telemetry: /tmp/overlay_perf.log.
 
 CMD=/dev/MiSTer_cmd
 LOG=/tmp/overlay_perf.log
@@ -22,29 +22,44 @@ echo "osd_msg Hello from the translation PoC" > $CMD
 sleep 3
 echo 'osd_msg -f 1 -t 5000 Translated:\n\nHERO: I found the\nancient sword!' > $CMD
 sleep 5
-# position experiment: same units as Info()'s default 20,10 - probe where
-# a subtitle bar would sit on this core/video mode
-echo "osd_msg -x 4 -y 200 -t 3000 subtitle position probe (-y 200)" > $CMD
-sleep 4
 
 say "M1: full-color test pattern via the HPS framebuffer (replaces game for 4s)"
 echo "  bar order should be: white yellow cyan green magenta red blue black"
-echo "  (if red/blue are swapped, the ARGB/RxB assumption is wrong - note it!)"
 echo "overlay_show testpat" > $CMD
 sleep 4
 echo "overlay_hide" > $CMD
 sleep 1
 
-say "M2: capture -> re-display round trip"
+say "M2a: freeze-frame, all in RAM (overlay_shot - the real pipeline path)"
+echo "overlay_shot" > $CMD
+sleep 4
+echo "overlay_hide" > $CMD
+sleep 1
+
+say "M2b: capture -> PNG on SD -> re-display (the slow reference path)"
+# wait for a NEW encode+write line, not a stale one from an earlier run,
+# and require ok=1 - the save can legitimately fail
+N0=$(grep -c "screenshot: encode+write" "$LOG" 2>/dev/null)
+N0=${N0:-0}
 rm -f "$SHOT"
 echo "screenshot poc.png" > $CMD
-
-# the encode+write perf line is the reliable "file is complete" signal
-for i in $(seq 1 100); do
-    grep -q "encode+write.*poc.png" "$LOG" 2>/dev/null && break
+line=""
+for i in $(seq 1 150); do
+    N1=$(grep -c "screenshot: encode+write" "$LOG" 2>/dev/null)
+    N1=${N1:-0}
+    if [ "$N1" -gt "$N0" ]; then
+        line=$(grep "screenshot: encode+write" "$LOG" | tail -n 1)
+        break
+    fi
     sleep 0.1
 done
-[ -s "$SHOT" ] || fail "screenshot never appeared at $SHOT"
+[ -n "$line" ] || fail "screenshot never completed (no new encode+write line)"
+echo "  $line"
+case "$line" in
+    *"ok=1"*) : ;;
+    *) fail "screenshot save failed - check 'save FAILED imlib_err=' in $LOG" ;;
+esac
+[ -s "$SHOT" ] || fail "save reported ok but $SHOT is missing"
 
 echo "overlay_show $SHOT" > $CMD
 sleep 4
@@ -56,7 +71,8 @@ tail -n 20 "$LOG"
 
 echo
 echo "PoC sequence complete. Interesting numbers:"
-echo "  osd_msg render+spi   - text-over-game cost (should be ~1-2ms)"
-echo "  screenshot read      - DDR3 frame copy (NEON; ~3-5ms per Screenshot_MiSTer)"
-echo "  screenshot total     - request->PNG-on-SD (includes vsync wait + PNG encode)"
-echo "  overlay_show total   - draw + scaler switch + vsync (the 'on glass' bound)"
+echo "  osd_msg render+spi        - text-over-game cost (hardware: ~1.8ms)"
+echo "  screenshot read           - DDR3 frame copy (hardware: ~4ms)"
+echo "  overlay_shot total        - freeze-frame on glass, RAM only"
+echo "  blit(cached) vs copy(ddr) - is the fb wall the mapping or the access pattern?"
+echo "  overlay_show total        - PNG-from-SD reference path"

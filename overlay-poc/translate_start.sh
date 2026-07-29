@@ -26,10 +26,16 @@ install)
     exit 0
     ;;
 stop)
-    echo quit > /tmp/translate_cmd 2>/dev/null
-    sleep 1
-    pkill -f translate_daemon.py 2>/dev/null
-    echo "stopped"
+    # a fifo write BLOCKS when nobody reads it - only talk to the pipe
+    # when the daemon actually exists, and timeout in case it's wedged
+    if pgrep -f translate_daemon.py >/dev/null 2>&1; then
+        timeout 2 sh -c 'echo quit > /tmp/translate_cmd' 2>/dev/null
+        sleep 1
+        pkill -f translate_daemon.py 2>/dev/null
+        echo "stopped"
+    else
+        echo "not running"
+    fi
     exit 0
     ;;
 esac

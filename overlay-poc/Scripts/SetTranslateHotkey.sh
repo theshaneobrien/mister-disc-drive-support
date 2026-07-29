@@ -17,9 +17,10 @@ mkdir -p /media/fat/overlay
 
 PAUSED=
 if pgrep -f translate_daemon.py >/dev/null 2>&1; then
-    echo "pause 120" > "$FIFO" 2>/dev/null && PAUSED=1
+    # timeout belt: a fifo write blocks if the reader vanishes mid-check
+    timeout 2 sh -c "echo 'pause 120' > $FIFO" 2>/dev/null && PAUSED=1
 fi
-trap '[ -n "$PAUSED" ] && echo resume > "$FIFO" 2>/dev/null' EXIT
+trap '[ -n "$PAUSED" ] && timeout 2 sh -c "echo resume > $FIFO" 2>/dev/null' EXIT
 
 echo "=== Translation hotkey setup ==="
 if [ -f "$CFG" ]; then

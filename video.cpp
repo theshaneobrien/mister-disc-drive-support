@@ -4466,7 +4466,12 @@ void video_overlay_show(const char *arg)
 	overlay_present(img, src_w, src_h, "overlay_show", t_load);
 
 	imlib_context_set_image(img);
-	imlib_free_image();
+	// decache, not just free: imlib2 caches decoded images BY FILE PATH,
+	// and the translation pipeline rewrites the same /tmp file each round -
+	// a plain free kept serving the FIRST decode forever (hardware-found:
+	// load=28ms first show, load=~100us cache hits ever after). Same reason
+	// write_screenshot uses free_image_and_decache.
+	imlib_free_image_and_decache();
 }
 
 void video_overlay_hide()

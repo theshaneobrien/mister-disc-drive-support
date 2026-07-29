@@ -4,16 +4,16 @@
 # Run it from the OSD Scripts menu. While a script runs, Main releases its
 # exclusive input grab, so this can listen to the controller/keyboard
 # directly: press the button (or hold one and press a second for a combo)
-# and it writes /media/fat/overlay/hotkey.cfg for you.
+# and it writes /media/fat/translate/hotkey.cfg for you.
 # Takes effect the next time a core is loaded.
 #
 # The translate daemon is paused while this listens - otherwise pressing
 # the CURRENT hotkey during setup fires a real translation of the script
 # terminal (seen on hardware as ztranslate HTTP 500s).
 
-CFG=/media/fat/overlay/hotkey.cfg
+CFG=/media/fat/translate/hotkey.cfg
 FIFO=/tmp/translate_cmd
-mkdir -p /media/fat/overlay
+mkdir -p /media/fat/translate
 
 PAUSED=
 if pgrep -f translate_daemon.py >/dev/null 2>&1; then

@@ -401,11 +401,21 @@ def redact(url):
     return re.sub(r"(api_key=)[^&]+", r"\1***", url)
 
 
+def default_config():
+    # /media/fat/translate is the shipped home; /media/fat/overlay was the
+    # PoC-era path - honor an existing one so migrations can't strand a setup
+    for p in ("/media/fat/translate/translate.ini",
+              "/media/fat/overlay/translate.ini"):
+        if os.path.exists(p):
+            return p
+    return "/media/fat/translate/translate.ini"
+
+
 def main():
     # settings precedence: CLI args > translate.ini > built-in defaults.
     # The ini is the user-facing surface (autostart has no CLI).
     pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--config", default="/media/fat/overlay/translate.ini",
+    pre.add_argument("--config", default=default_config(),
                      help="settings file (KEY=VALUE); CLI args override it")
     cargs, _ = pre.parse_known_args()
     ini = load_ini(cargs.config)

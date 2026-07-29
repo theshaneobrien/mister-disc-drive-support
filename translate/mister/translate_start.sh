@@ -1,15 +1,15 @@
 #!/bin/bash
 # Boot launcher for the MiSTer translation daemon.
 #
-#   /media/fat/overlay/translate_start.sh            start if ENABLED=1
-#   /media/fat/overlay/translate_start.sh install    hook into boot
-#   /media/fat/overlay/translate_start.sh stop       stop a running daemon
+#   /media/fat/translate/translate_start.sh            start if ENABLED=1
+#   /media/fat/translate/translate_start.sh install    hook into boot
+#   /media/fat/translate/translate_start.sh stop       stop a running daemon
 #
 # 'install' appends one line to /media/fat/linux/user-startup.sh - the
 # update-safe boot hook (/etc/init.d/S99User runs it; SD files survive
 # Linux updates, /etc does not). Idempotent: safe to run again.
 
-DIR=/media/fat/overlay
+DIR=/media/fat/translate
 INI=$DIR/translate.ini
 US=/media/fat/linux/user-startup.sh
 
@@ -20,7 +20,7 @@ install)
     if grep -q translate_start.sh "$US"; then
         echo "already installed in $US"
     else
-        echo '[ -x /media/fat/overlay/translate_start.sh ] && /media/fat/overlay/translate_start.sh >/dev/null 2>&1 &' >> "$US"
+        echo '[ -x /media/fat/translate/translate_start.sh ] && /media/fat/translate/translate_start.sh >/dev/null 2>&1 &' >> "$US"
         echo "installed into $US - daemon starts at boot when ENABLED=1 in $INI"
     fi
     exit 0

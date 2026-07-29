@@ -1,3 +1,10 @@
+# Development notes (PoC history)
+
+> Historical record of the overlay PoC: milestones 0–6, hardware
+> findings, telemetry numbers, and the incident log. Paths in here refer
+> to the PoC-era `/media/fat/overlay`. Current user docs: [README](../README.md);
+> current design: [ARCHITECTURE](ARCHITECTURE.md).
+
 # Overlay PoC — on-the-fly translation for MiSTer
 
 ## User setup (the whole thing, post-PoC)

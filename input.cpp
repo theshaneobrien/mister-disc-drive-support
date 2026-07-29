@@ -2976,7 +2976,10 @@ static void overlay_hotkey(struct input_event *ev)
 	if (!loaded)
 	{
 		loaded = 1;
-		FILE *f = fopen("/media/fat/overlay/hotkey.cfg", "r");
+		// /media/fat/translate is the shipped home; /media/fat/overlay was
+		// the PoC-era path - honor both so migrations can't strand a setup
+		FILE *f = fopen("/media/fat/translate/hotkey.cfg", "r");
+		if (!f) f = fopen("/media/fat/overlay/hotkey.cfg", "r");
 		if (f)
 		{
 			char line[64] = {};

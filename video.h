@@ -71,6 +71,11 @@ int video_chvt(int num);
 void video_cmd(char *cmd);
 void video_mode_cmd(char *cmd);
 
+// overlay PoC: show a full-color image over a running core via the HPS
+// framebuffer (replaces core video until hidden), timed to /tmp/overlay_perf.log
+void video_overlay_show(const char *arg);
+void video_overlay_hide();
+
 void video_core_description(char *str, size_t len);
 void video_scaler_description(char *str, size_t len);
 char* video_get_core_mode_name(int with_vrefresh = 1);

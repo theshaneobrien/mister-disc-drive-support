@@ -181,9 +181,47 @@ echo go > /tmp/translate_cmd
 TLS note: python's urllib falls back to the rootfs CA bundle
 (/etc/ssl/certs/cacert.pem) if the default CA path is empty on the image.
 
+## Milestone 5 — hotkey + any-button dismiss (v6, `overlaypoc6`)
+
+The EVIOCGRAB question answered itself: Main grabs every input device
+exclusively while a core runs (`input.cpp` `grabbed = 1`), so the hotkey
+lives in Main's `input_cb` — the one point every event from every device
+passes through, keyboard or pad alike.
+
+**Config — `/media/fat/overlay/hotkey.cfg`** (one line; loaded at core
+start, since core loads re-exec Main):
+
+| Content | Meaning |
+|---|---|
+| `314+315` | combo: fires when both held (SELECT+START on most pads) |
+| `68` | single key (68 = F10 on a keyboard) |
+| `learn` | log every pressed button's evdev code to the perf log |
+| *(no file)* | hotkey off; dismiss stays active |
+
+Common codes: `BTN_SELECT=314` `BTN_START=315` `BTN_TL=310` `BTN_TR=311`
+`BTN_THUMBL=317` `BTN_THUMBR=318` `KEY_F10=68` `KEY_PAUSE=119`.
+
+Behavior, by design:
+- Firing writes `go` to the daemon fifo — byte-identical to the manual
+  `echo`, so translation stays **strictly on-demand** (no polling exists
+  anywhere; the daemon's 2s min-interval still guards the API quota).
+- **Any other button press or d-pad hat movement clears the shown
+  translation** — and the same press still reaches the game, so "press A
+  to continue" advances the dialogue and drops the old text in one go.
+  All other `EV_ABS` (analog sticks, gyro/accelerometer streams — DS4
+  etc.) are deliberately ignored and can never dismiss mid-read.
+- The hotkey is *observed, not consumed*: the core still sees the
+  presses. Pick codes your game ignores (or a keyboard key). True
+  consumption needs delayed forwarding — future refinement.
+
 ## Next milestones (not in this branch)
 
-5. controller hotkey (evdev grab question) replacing the SSH/FIFO trigger
 7. image mode without a render server: Main already links freetype via
    imlib2 — an `overlay_text x y <str>` verb could draw translated text
    boxes over the frozen frame using Vision's bounding boxes
+8. side-by-side install via MGL launchers instead of replacing
+   /media/fat/MiSTer — the physcd sidecar already proved the mechanism
+   (`main=` ini routing + alternate binary name + `routed_main()`
+   basename detection); the overlay binary could ship the same way
+9. google backend A/B (Vision may crack the stylized fonts ztranslate
+   declines; exercises OSD text mode + smart placement)

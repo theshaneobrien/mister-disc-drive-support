@@ -1,19 +1,31 @@
 #!/bin/bash
-# TranslateHotkey - set the translation hotkey from the MiSTer Scripts menu.
+# SetTranslateHotkey - set the translation hotkey from the MiSTer Scripts menu.
 #
-# Copy to /media/fat/Scripts/ and run it from the OSD Scripts menu. While a
-# script runs, Main releases its exclusive input grab, so this can listen to
-# the controller/keyboard directly: press the button (or hold one and press a
-# second for a combo) and it writes /media/fat/overlay/hotkey.cfg for you.
+# Run it from the OSD Scripts menu. While a script runs, Main releases its
+# exclusive input grab, so this can listen to the controller/keyboard
+# directly: press the button (or hold one and press a second for a combo)
+# and it writes /media/fat/overlay/hotkey.cfg for you.
 # Takes effect the next time a core is loaded.
+#
+# The translate daemon is paused while this listens - otherwise pressing
+# the CURRENT hotkey during setup fires a real translation of the script
+# terminal (seen on hardware as ztranslate HTTP 500s).
 
 CFG=/media/fat/overlay/hotkey.cfg
+FIFO=/tmp/translate_cmd
 mkdir -p /media/fat/overlay
+
+PAUSED=
+if pgrep -f translate_daemon.py >/dev/null 2>&1; then
+    echo "pause 120" > "$FIFO" 2>/dev/null && PAUSED=1
+fi
+trap '[ -n "$PAUSED" ] && echo resume > "$FIFO" 2>/dev/null' EXIT
 
 echo "=== Translation hotkey setup ==="
 if [ -f "$CFG" ]; then
     echo "Current setting: $(head -1 "$CFG")"
 fi
+[ -n "$PAUSED" ] && echo "(translate daemon paused while you choose)"
 echo ""
 echo "Press the button you want as your translate hotkey."
 echo "For a COMBO: hold the first button, then press the second."
@@ -61,7 +73,7 @@ def drain():
             pass
 
 def presses(timeout):
-    """Yield (code) for every EV_KEY press until timeout."""
+    """Yield codes for every EV_KEY press until timeout."""
     end = time.monotonic() + timeout
     while True:
         left = end - time.monotonic()
@@ -91,9 +103,11 @@ if first is None:
     print("Nothing pressed - keeping the current setting.")
     sys.exit(0)
 
-# short window for a combo partner
+print("Got: %s" % name(first), flush=True)
+print("...press a second button within 1.5s to make it a combo", flush=True)
+
 second = None
-for code in presses(0.8):
+for code in presses(1.5):
     if code != first:
         second = code
         break
@@ -108,6 +122,7 @@ else:
 with open(CFG, "w") as f:
     f.write(line + "\n")
 
+print("")
 print("Saved: %s" % human)
 print("-> %s = %s" % (CFG, line))
 print("")

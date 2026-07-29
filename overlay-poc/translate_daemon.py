@@ -330,12 +330,19 @@ def ensure_fifo(path):
 _last_translate = [0.0]
 _overlay_shown = [False]
 _shot_seq = [0]
+_paused_until = [0.0]  # pause window: hotkey-setup etc. suppress triggers
 
 
 def translate_once(args, mode):
+    # paused (e.g. SetTranslateHotkey is listening for buttons - the Main
+    # hotkey still fires while the user presses candidates)
+    now = time.monotonic()
+    if now < _paused_until[0]:
+        plog("translate: SKIPPED (paused, %.0fs left)" % (_paused_until[0] - now))
+        return
+
     # insurance for API-key backends: no trigger storm (replayed file,
     # double echo, script bug) may ever hammer a paid/quota'd service
-    now = time.monotonic()
     if now - _last_translate[0] < args.min_interval:
         plog("translate: SKIPPED (repeat within %.1fs min-interval)" % args.min_interval)
         return
@@ -477,6 +484,21 @@ def main():
                 elif cmd == "hide":
                     mister("overlay_hide")
                     _overlay_shown[0] = False
+                elif cmd.startswith("pause"):
+                    # pause [seconds] - suppress triggers (auto-resumes so a
+                    # crashed hotkey-setup script can't wedge the daemon)
+                    secs = 120.0
+                    parts = cmd.split()
+                    if len(parts) > 1:
+                        try:
+                            secs = float(parts[1])
+                        except ValueError:
+                            pass
+                    _paused_until[0] = time.monotonic() + secs
+                    plog("translate: PAUSED %.0fs (echo resume to end early)" % secs)
+                elif cmd == "resume":
+                    _paused_until[0] = 0.0
+                    plog("translate: resumed")
                 elif cmd in ("go", "text", "image"):
                     translate_once(args, args.mode if cmd == "go" else cmd)
                 else:

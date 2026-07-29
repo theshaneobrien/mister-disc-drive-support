@@ -28,6 +28,7 @@
 #include "offload.h"
 #include "hdmi_cec.h"
 #include "perf_log.h"
+#include "scaler.h"
 
 #include "support.h"
 #include "support/arcade/mra_loader.h"
@@ -4419,6 +4420,114 @@ void video_overlay_hide()
 
 	video_fb_enable(0);
 	perf_log("overlay_hide: %lluus", perf_now_us() - t0);
+}
+
+void video_overlay_shot()
+{
+	// capture the current core frame and show it via the framebuffer in one
+	// step, entirely in RAM - no PNG, no SD. This is the display path the
+	// translation pipeline will use (capture -> [server] -> show), so its
+	// timings are the numbers that matter.
+	//
+	// The blit goes into a CACHED shadow buffer first, then one sequential
+	// pass into the uncached DDR bank. That is deliberate instrumentation:
+	// testpat's direct scattered stores measured ~42MB/s on hardware; the
+	// blit(cached) vs copy(ddr) split shows whether the wall is the mapping
+	// or the access pattern.
+	uint64_t t0 = perf_now_us();
+
+	if (!fb_base || fb_width <= 0 || fb_height <= 0)
+	{
+		perf_log("overlay_shot: no framebuffer (%dx%d)", fb_width, fb_height);
+		return;
+	}
+
+	if (is_menu())
+	{
+		perf_log("overlay_shot: refused in menu core");
+		return;
+	}
+
+	mister_scaler *ms = mister_scaler_init();
+	if (!ms)
+	{
+		perf_log("overlay_shot: scaler init FAILED");
+		return;
+	}
+	uint64_t t_init = perf_now_us();
+
+	int src_w = ms->width;
+	int src_h = ms->height;
+	uint8_t *cap = (uint8_t*)malloc((size_t)src_w * src_h * 4);
+	if (!cap)
+	{
+		mister_scaler_free(ms);
+		perf_log("overlay_shot: capture malloc failed (%dx%d)", src_w, src_h);
+		return;
+	}
+
+	mister_scaler_read(ms, cap, ARGB32);
+	mister_scaler_free(ms);
+	uint64_t t_read = perf_now_us();
+
+	uint32_t *shadow = (uint32_t*)malloc((size_t)fb_width * fb_height * 4);
+	if (!shadow)
+	{
+		free(cap);
+		perf_log("overlay_shot: shadow malloc failed (%dx%d)", fb_width, fb_height);
+		return;
+	}
+
+	Imlib_Image src = imlib_create_image_using_data(src_w, src_h, (uint32_t*)cap);
+	Imlib_Image dst = imlib_create_image_using_data(fb_width, fb_height, shadow);
+	if (!src || !dst)
+	{
+		if (src) { imlib_context_set_image(src); imlib_free_image(); }
+		if (dst) { imlib_context_set_image(dst); imlib_free_image(); }
+		free(shadow);
+		free(cap);
+		perf_log("overlay_shot: imlib wrap failed");
+		return;
+	}
+
+	imlib_context_set_image(dst);
+	imlib_context_set_anti_alias(0);
+	imlib_context_set_blend(0);
+	imlib_blend_image_onto_image(src, 0,
+		0, 0, src_w, src_h,
+		0, 0, fb_width, fb_height);
+	imlib_free_image();              // dst wrapper; shadow stays ours
+	imlib_context_set_image(src);
+	imlib_free_image();
+	uint64_t t_blit = perf_now_us();
+
+	memcpy((void*)(fb_base + (FB_SIZE * 1)), shadow, (size_t)fb_width * fb_height * 4);
+	uint64_t t_copy = perf_now_us();
+
+	free(shadow);
+	free(cap);
+
+	video_fb_enable(1, 1);
+	if (!fb_enabled)
+	{
+		perf_log("overlay_shot: enable REFUSED (core doesn't support HPS framebuffer)");
+		return;
+	}
+	uint64_t t_en = perf_now_us();
+
+	uint64_t t_vs = t_en;
+	int fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
+	if (fb >= 0)
+	{
+		int zero = 0;
+		if (ioctl(fb, FBIO_WAITFORVSYNC, &zero) != -1) t_vs = perf_now_us();
+		close(fb);
+	}
+
+	perf_log("overlay_shot: %dx%d -> %dx%d init=%lluus read=%lluus blit(cached)=%lluus copy(ddr)=%lluus enable=%lluus vsync=%lluus total=%lluus",
+		src_w, src_h, fb_width, fb_height,
+		t_init - t0, t_read - t_init, t_blit - t_read, t_copy - t_blit,
+		t_en - t_copy, t_vs - t_en, t_vs - t0);
 }
 
 void video_cmd(char *cmd)

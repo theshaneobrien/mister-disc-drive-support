@@ -491,8 +491,15 @@ bool write_screenshot(const char *filename, const uint8_t *inbuf,
         imlib_context_set_blend(0);
     }
 
+    // keep a private copy of the path: getFullPath hands back a shared
+    // static buffer the main loop rewrites constantly, and this runs on
+    // the offload worker. do_screenshot now passes an absolute path so
+    // the raced call never happens here at all.
+    char pathbuf[1024];
+    snprintf(pathbuf, sizeof(pathbuf), "%s", (filename[0] == '/') ? filename : getFullPath(filename));
+
     Imlib_Load_Error error;
-    imlib_save_image_with_error_return(getFullPath(filename), &error);
+    imlib_save_image_with_error_return(pathbuf, &error);
 
     if (scaled && scaled != im) {
         imlib_context_set_image(scaled);
@@ -506,6 +513,9 @@ bool write_screenshot(const char *filename, const uint8_t *inbuf,
     
     if (error != IMLIB_LOAD_ERROR_NONE) {
         print_imlib_load_error(error, filename);
+        // the console printf above is invisible over ssh - put the real
+        // failure reason where the PoC telemetry lives
+        perf_log("screenshot: save FAILED imlib_err=%d path=%s", error, pathbuf);
         return false;
     }
 
@@ -626,8 +636,12 @@ void do_screenshot(char* imgname)
 		scaled_width = scaled_height * ((float)base_width/base_height);
 	}
 	
-	char* filename_copy = strdup(filename);
-	
+	// resolve to an absolute path on the MAIN thread: the worker must not
+	// call getFullPath (shared static buffer, races with the main loop's
+	// file_io traffic - seen on hardware as a 27ms ok=0 save with no file
+	// while a game core was live)
+	char* filename_copy = strdup((filename[0] == '/') ? filename : getFullPath(filename));
+
 	if (!filename_copy) {
 		screenshot_pending_atomic = false;
 		screenshot_rescale = 0;
@@ -676,9 +690,11 @@ void screenshot_cb(void)
             case SCREENSHOT_SUCCESS:
                 if (result_data->filename)
                 {
+                    // filename is absolute now - show it from screenshots/ on
+                    const char *rel = strstr(result_data->filename, SCREENSHOT_DIR "/");
                     char msg[1024];
                     snprintf(msg, sizeof(msg), "Screen saved to\n%s",
-                            result_data->filename + strlen(SCREENSHOT_DIR "/"));
+                            rel ? rel + strlen(SCREENSHOT_DIR "/") : result_data->filename);
                     printf("%s\n", msg);
                     Info(msg);
                 }

@@ -76,6 +76,7 @@ void video_mode_cmd(char *cmd);
 void video_overlay_show(const char *arg);
 void video_overlay_hide();
 void video_overlay_shot();
+int  video_overlay_state();
 
 void video_core_description(char *str, size_t len);
 void video_scaler_description(char *str, size_t len);

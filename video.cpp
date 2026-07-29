@@ -4488,6 +4488,14 @@ void video_overlay_hide()
 	perf_log("overlay_hide: %lluus", perf_now_us() - t0);
 }
 
+int video_overlay_state()
+{
+	// the translation overlay specifically: a non-zero bank while a game
+	// core runs. Bank 0 is the Linux console (F9), and the menu core uses
+	// banks 1/2 for its own background machinery - neither is ours.
+	return !is_menu() && fb_enabled && fb_num != 0;
+}
+
 void video_overlay_shot()
 {
 	// capture the current core frame and show it via the framebuffer in one

@@ -38,7 +38,9 @@ import base64
 import json
 import mmap
 import os
+import signal
 import ssl
+import stat
 import struct
 import sys
 import textwrap
@@ -268,7 +270,34 @@ def backend_google(args, mode, png, rowdoubled, native_h):
 
 # ---------------------------------------------------------------- pipeline
 
+def ensure_fifo(path):
+    """Make sure the trigger path is a REAL fifo.
+
+    If `echo cmd > path` runs before the daemon starts, the shell creates a
+    plain file - and reading a plain file in the trigger loop replays its
+    content forever, one API call per round trip (the ztranslate hammer
+    incident). A stale non-fifo gets replaced, so start order is harmless.
+    """
+    try:
+        if not stat.S_ISFIFO(os.stat(path).st_mode):
+            os.unlink(path)
+            os.mkfifo(path)
+    except FileNotFoundError:
+        os.mkfifo(path)
+
+
+_last_translate = [0.0]
+
+
 def translate_once(args, mode):
+    # insurance for API-key backends: no trigger storm (replayed file,
+    # double echo, script bug) may ever hammer a paid/quota'd service
+    now = time.monotonic()
+    if now - _last_translate[0] < args.min_interval:
+        plog("translate: SKIPPED (repeat within %.1fs min-interval)" % args.min_interval)
+        return
+    _last_translate[0] = now
+
     t0 = time.monotonic()
     try:
         png, w, h, rowdoubled, native_h = capture_png(args)
@@ -311,6 +340,8 @@ def main():
     ap.add_argument("--png-level", type=int, default=1, help="zlib level (1=fast)")
     ap.add_argument("--osd-ms", type=int, default=8000, help="osd_msg display time")
     ap.add_argument("--fifo", default="/tmp/translate_cmd", help="trigger fifo")
+    ap.add_argument("--min-interval", type=float, default=2.0,
+                    help="minimum seconds between translations (quota guard)")
     ap.add_argument("--once", action="store_true",
                     help="single translate (using --mode) then exit; no fifo")
     args = ap.parse_args()
@@ -325,11 +356,13 @@ def main():
         translate_once(args, args.mode)
         return
 
-    if not os.path.exists(args.fifo):
-        os.mkfifo(args.fifo)
-    plog("translate: daemon up backend=%s server=%s mode=%s fifo=%s" %
-         (args.backend, args.server if args.backend == "service" else "google-api",
-          args.mode, args.fifo))
+    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+    ensure_fifo(args.fifo)
+    plog("translate: daemon up pid=%d backend=%s server=%s mode=%s" %
+         (os.getpid(), args.backend,
+          args.server if args.backend == "service" else "google-api", args.mode))
+    plog("translate: trigger: echo image|text|go|hide > %s   stop: echo quit > %s (or kill %d)"
+         % (args.fifo, args.fifo, os.getpid()))
 
     while True:
         # open() blocks until a writer appears; EOF when it closes - reopen

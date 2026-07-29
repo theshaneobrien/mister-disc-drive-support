@@ -15,12 +15,27 @@ CFG=/media/fat/translate/hotkey.cfg
 FIFO=/tmp/translate_cmd
 mkdir -p /media/fat/translate
 
+# busybox-safe process check: the MiSTer rootfs has no pgrep
+daemon_running() {
+    for d in /proc/[0-9]*; do
+        grep -qs "translate_daemon\.py" "$d/cmdline" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+fifo_send() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 2 sh -c "echo '$1' > $FIFO" 2>/dev/null
+    else
+        echo "$1" > "$FIFO" 2>/dev/null
+    fi
+}
+
 PAUSED=
-if pgrep -f translate_daemon.py >/dev/null 2>&1; then
-    # timeout belt: a fifo write blocks if the reader vanishes mid-check
-    timeout 2 sh -c "echo 'pause 120' > $FIFO" 2>/dev/null && PAUSED=1
+if daemon_running; then
+    fifo_send "pause 120" && PAUSED=1
 fi
-trap '[ -n "$PAUSED" ] && timeout 2 sh -c "echo resume > $FIFO" 2>/dev/null' EXIT
+trap '[ -n "$PAUSED" ] && fifo_send resume' EXIT
 
 echo "=== Translation hotkey setup ==="
 if [ -f "$CFG" ]; then

@@ -8,10 +8,30 @@
 # 'install' appends one line to /media/fat/linux/user-startup.sh - the
 # update-safe boot hook (/etc/init.d/S99User runs it; SD files survive
 # Linux updates, /etc does not). Idempotent: safe to run again.
+#
+# Busybox-safe: the MiSTer rootfs has no pgrep/pkill (and maybe no
+# timeout), so process checks scan /proc directly.
 
 DIR=/media/fat/translate
 INI=$DIR/translate.ini
 US=/media/fat/linux/user-startup.sh
+FIFO=/tmp/translate_cmd
+
+daemon_pids() {
+    for d in /proc/[0-9]*; do
+        grep -qs "translate_daemon\.py" "$d/cmdline" 2>/dev/null && echo "${d##*/}"
+    done
+}
+
+fifo_send() {
+    # a fifo write BLOCKS when nobody reads it - callers must check
+    # daemon_pids first; timeout (when present) guards a wedged daemon
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 2 sh -c "echo '$1' > $FIFO" 2>/dev/null
+    else
+        echo "$1" > "$FIFO" 2>/dev/null
+    fi
+}
 
 case "$1" in
 install)
@@ -26,12 +46,11 @@ install)
     exit 0
     ;;
 stop)
-    # a fifo write BLOCKS when nobody reads it - only talk to the pipe
-    # when the daemon actually exists, and timeout in case it's wedged
-    if pgrep -f translate_daemon.py >/dev/null 2>&1; then
-        timeout 2 sh -c 'echo quit > /tmp/translate_cmd' 2>/dev/null
+    if [ -n "$(daemon_pids)" ]; then
+        fifo_send quit
         sleep 1
-        pkill -f translate_daemon.py 2>/dev/null
+        PIDS=$(daemon_pids)
+        [ -n "$PIDS" ] && kill $PIDS 2>/dev/null
         echo "stopped"
     else
         echo "not running"
@@ -42,6 +61,6 @@ esac
 
 # boot path: only start when the user opted in and nothing is running
 grep -q '^ENABLED=1' "$INI" 2>/dev/null || exit 0
-pgrep -f translate_daemon.py >/dev/null && exit 0
+[ -n "$(daemon_pids)" ] && exit 0
 
 exec python3 "$DIR/translate_daemon.py" --config "$INI"

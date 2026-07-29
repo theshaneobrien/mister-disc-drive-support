@@ -112,3 +112,6 @@ Runtime artifacts (all `/tmp`, RAM-only): `overlay_perf.log`,
 6. **The scaler mux replaces, never blends.** Full-color over live video
    is impossible without RTL changes (`ascal.vhd` discards fb alpha);
    freeze-frame + OSD text are the two honest modes.
+7. **Assume busybox.** The MiSTer rootfs has no `pgrep`/`pkill` (and
+   `timeout` is not guaranteed): scan `/proc/*/cmdline` for process
+   checks, `kill` by pid, and `command -v` before optional tools.

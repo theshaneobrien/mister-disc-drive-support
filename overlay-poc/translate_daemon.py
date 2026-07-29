@@ -1,25 +1,36 @@
 #!/usr/bin/env python3
-"""MiSTer AI-translation PoC daemon (milestone 4).
+"""MiSTer AI-translation PoC daemon (milestones 4+).
 
 Captures the current core frame straight from the scaler buffer in DDR3
-(the same mmap Main's screenshot uses - passive, the core is untouched),
-encodes it as PNG with nothing but stdlib, POSTs it to a RetroArch
-AI-Service-compatible endpoint (vgtranslate / ztranslate / mock_server.py),
-and routes the reply back through Main's FIFO verbs:
+(passive mmap - the core is untouched), and translates it via one of two
+backends, both usable WITHOUT self-hosting anything:
 
-    "text"  -> osd_msg   (over the live game)
-    "image" -> overlay_show /tmp/translated.png   (freeze-frame)
+  --backend service   (default) RetroArch-AI-Service protocol POST.
+                      Works with the hosted ztranslate.net (free account +
+                      API key -> full IMAGE mode, translation rendered
+                      server-side), a LAN vgtranslate, or mock_server.py:
+                        --server "https://ztranslate.net/service?api_key=KEY"
+                        --server "http://<pc>:4404"
+
+  --backend google    Direct-to-cloud: Google Vision OCR + Google Translate
+                      REST APIs, called straight from the MiSTer. No server
+                      anywhere. TEXT mode: result appears as an OSD toast
+                      over the running game, auto-placed opposite the
+                      detected text. Needs --google-key (free tier: 1k OCR
+                      calls + 500k translated chars/month).
+
+Replies route through Main's FIFO verbs: text -> osd_msg (live game),
+image -> overlay_show /tmp/translated.png (freeze-frame).
 
 Runs on the stock MiSTer rootfs python3, stdlib only, as root.
 
-Usage (on the MiSTer):
+Usage:
     python3 translate_daemon.py --server http://<pc>:4404 &
+    python3 translate_daemon.py --backend google --google-key AIza... &
     echo image > /tmp/translate_cmd     # or: text / go / hide / quit
 
-    python3 translate_daemon.py --server http://<pc>:4404 --once --mode text
-
-Timings land in /tmp/overlay_perf.log alongside Main's own telemetry
-(same CLOCK_MONOTONIC timebase, so the two interleave meaningfully).
+Timings land in /tmp/overlay_perf.log on the same monotonic timebase as
+Main's telemetry.
 """
 
 import argparse
@@ -27,9 +38,12 @@ import base64
 import json
 import mmap
 import os
+import ssl
 import struct
 import sys
+import textwrap
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
@@ -39,6 +53,10 @@ SCALER_SIZE = 2048 * 3 * 1024
 MISTER_CMD = "/dev/MiSTer_cmd"
 PERF_LOG = "/tmp/overlay_perf.log"
 TRANSLATED_PNG = "/tmp/translated.png"
+CA_FALLBACK = "/etc/ssl/certs/cacert.pem"  # MiSTer rootfs CA bundle
+
+VISION_URL = "https://vision.googleapis.com/v1/images:annotate?key=%s"
+GTRANSLATE_URL = "https://translation.googleapis.com/language/translate/v2?key=%s"
 
 
 def plog(msg):
@@ -103,6 +121,56 @@ def png_encode(w, h, rows, level=1):
             + chunk(b"IEND", b""))
 
 
+def http_post_json(url, obj, timeout):
+    """POST JSON, return parsed JSON reply. Falls back to the rootfs CA
+    bundle if python's default CA path is empty on this image."""
+    data = json.dumps(obj).encode()
+    req = urllib.request.Request(url, data=data,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read(300).decode(errors="replace")
+        except OSError:
+            pass
+        raise RuntimeError("HTTP %d: %s" % (e.code, detail)) from None
+    except urllib.error.URLError as e:
+        if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError) \
+                and os.path.exists(CA_FALLBACK):
+            ctx = ssl.create_default_context(cafile=CA_FALLBACK)
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                return json.loads(r.read().decode())
+        raise
+
+
+def capture_png(args):
+    """Grab a frame, fix anamorphic aspect, PNG it.
+    Returns (png_bytes, w, h, rowdoubled, native_h)."""
+    w, h, ow, oh, rows = capture()
+    native_h = h
+    rowdoubled = False
+    # anamorphic hi-res modes (e.g. SNES 512x224) squish glyphs; give the
+    # OCR square-ish pixels by doubling rows. Cheap: pure row duplication.
+    if w >= 2 * h:
+        rows = [r for r in rows for _ in (0, 1)]
+        h *= 2
+        rowdoubled = True
+    return png_encode(w, h, rows, level=args.png_level), w, h, rowdoubled, native_h
+
+
+def wrap_for_osd(text, width=30, max_lines=14):
+    """The OSD info window is 32 chars wide, 16 lines tall (minus frame)."""
+    lines = []
+    for para in text.replace("\r", "").split("\n"):
+        lines.extend(textwrap.wrap(para, width) or [""])
+    if len(lines) > max_lines:
+        lines = lines[:max_lines - 1] + ["..."]
+    return "\n".join(lines).strip()
+
+
 def sanitize_osd(text):
     """The OSD charfont is 8x8 ASCII - fold anything else, escape for osd_msg."""
     t = text.encode("ascii", "replace").decode()
@@ -110,33 +178,20 @@ def sanitize_osd(text):
     return t.strip() or "(empty reply)"
 
 
-def translate_once(args, mode):
-    t0 = time.monotonic()
-    try:
-        w, h, ow, oh, rows = capture()
-    except (RuntimeError, OSError) as e:
-        plog("translate: capture FAILED: %s" % e)
-        mister("osd_msg -t 4000 AI: capture failed")
-        return
-    t_cap = time.monotonic()
+def osd_show(args, text, y=None):
+    pos = ("-y %d " % y) if y is not None else ""
+    mister("osd_msg -f 1 -t %d %s%s" % (args.osd_ms, pos, sanitize_osd(text)))
 
-    # anamorphic hi-res modes (e.g. SNES 512x224) squish glyphs; give the
-    # OCR square-ish pixels by doubling rows. Cheap: pure row duplication.
-    aspect = ""
-    if w >= 2 * h:
-        rows = [r for r in rows for _ in (0, 1)]
-        h *= 2
-        aspect = " rowdoubled"
 
-    png = png_encode(w, h, rows, level=args.png_level)
-    t_png = time.monotonic()
+# ---------------------------------------------------------------- backends
 
-    body = json.dumps({
+def backend_service(args, mode, png):
+    """RetroArch-AI-Service protocol (ztranslate / vgtranslate / mock)."""
+    body = {
         "image": base64.b64encode(png).decode(),
         "label": "MiSTer__overlay_poc",
         "state": {"paused": 0},
-    }).encode()
-
+    }
     q = {"output": "image,png" if mode == "image" else "text"}
     if args.source:
         q["source_lang"] = args.source
@@ -144,49 +199,115 @@ def translate_once(args, mode):
         q["target_lang"] = args.target
     url = args.server + ("&" if "?" in args.server else "?") + urllib.parse.urlencode(q)
 
-    try:
-        req = urllib.request.Request(url, data=body,
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=args.timeout) as resp:
-            reply = json.loads(resp.read().decode())
-    except Exception as e:  # URLError, timeout, bad JSON - all end the same way
-        plog("translate: POST FAILED: %s" % e)
-        mister("osd_msg -t 5000 AI: server error\\n%s" % sanitize_osd(str(e))[:60])
-        return
-    t_post = time.monotonic()
+    reply = http_post_json(url, body, args.timeout)
 
-    routed = "nothing"
     if reply.get("error") and reply["error"] != "No text found.":
-        mister("osd_msg -t 5000 AI: %s" % sanitize_osd(reply["error"]))
-        routed = "error"
-    elif mode == "image" and reply.get("image"):
+        osd_show(args, "AI: " + reply["error"])
+        return "error"
+    if mode == "image" and reply.get("image"):
         with open(TRANSLATED_PNG, "wb") as f:
             f.write(base64.b64decode(reply["image"]))
         mister("overlay_show " + TRANSLATED_PNG)
-        routed = "image(%dB)" % len(reply["image"])
-    elif reply.get("text"):
-        mister("osd_msg -f 1 -t %d %s" % (args.osd_ms, sanitize_osd(reply["text"])))
-        routed = "text(%dch)" % len(reply["text"])
-    elif reply.get("error"):  # "No text found."
+        return "image(%dB)" % len(reply["image"])
+    if reply.get("text"):
+        osd_show(args, wrap_for_osd(reply["text"]))
+        return "text(%dch)" % len(reply["text"])
+    if reply.get("error"):
         mister("osd_msg -t 3000 AI: no text found")
-        routed = "notext"
+        return "notext"
+    return "nothing"
+
+
+def backend_google(args, mode, png, rowdoubled, native_h):
+    """Direct-to-cloud: Vision OCR then Translate, result as OSD text.
+    (image mode needs server-side rendering - use ztranslate for that.)"""
+    t0 = time.monotonic()
+
+    vreq = {"requests": [{
+        "image": {"content": base64.b64encode(png).decode()},
+        "features": [{"type": "TEXT_DETECTION"}],
+    }]}
+    if args.source:
+        vreq["requests"][0]["imageContext"] = {"languageHints": [args.source]}
+
+    vresp = http_post_json(VISION_URL % args.google_key, vreq, args.timeout)
+    r0 = (vresp.get("responses") or [{}])[0]
+    if "error" in r0:
+        raise RuntimeError("Vision: %s" % r0["error"].get("message", "?"))
+    full = r0.get("fullTextAnnotation", {}).get("text", "").strip()
+    t_vision = time.monotonic()
+
+    if not full:
+        mister("osd_msg -t 3000 AI: no text found")
+        return "notext (vision=%dms)" % ((t_vision - t0) * 1000)
+
+    # where is the text? place the OSD toast in the opposite half so the
+    # translation doesn't sit on top of the original dialogue box
+    y_osd = None
+    try:
+        verts = r0["textAnnotations"][0]["boundingPoly"]["vertices"]
+        ys = [v.get("y", 0) for v in verts]
+        mid = (min(ys) + max(ys)) / 2.0
+        if rowdoubled:
+            mid /= 2.0
+        y_osd = 10 if mid > native_h / 2.0 else max(10, native_h - 70)
+    except (KeyError, IndexError):
+        pass
+
+    treq = {"q": full, "target": args.target or "en", "format": "text"}
+    if args.source:
+        treq["source"] = args.source
+    tresp = http_post_json(GTRANSLATE_URL % args.google_key, treq, args.timeout)
+    translated = tresp["data"]["translations"][0]["translatedText"]
+    t_trans = time.monotonic()
+
+    osd_show(args, wrap_for_osd(translated), y=y_osd)
+    return "text(%dch) vision=%dms translate=%dms osd_y=%s" % (
+        len(translated), (t_vision - t0) * 1000, (t_trans - t_vision) * 1000, y_osd)
+
+
+# ---------------------------------------------------------------- pipeline
+
+def translate_once(args, mode):
+    t0 = time.monotonic()
+    try:
+        png, w, h, rowdoubled, native_h = capture_png(args)
+    except (RuntimeError, OSError) as e:
+        plog("translate: capture FAILED: %s" % e)
+        mister("osd_msg -t 4000 AI: capture failed")
+        return
+    t_png = time.monotonic()
+
+    try:
+        if args.backend == "google":
+            routed = backend_google(args, mode, png, rowdoubled, native_h)
+        else:
+            routed = backend_service(args, mode, png)
+    except Exception as e:  # HTTP/ssl/JSON shape - all end the same way
+        plog("translate: backend FAILED: %s" % e)
+        osd_show(args, "AI: server error\n" + str(e)[:80])
+        return
 
     t_done = time.monotonic()
-    plog("translate: %dx%d%s png=%dB cap=%dms png=%dms post=%dms route=%s total=%dms"
-         % (w, h, aspect, len(png),
-            (t_cap - t0) * 1000, (t_png - t_cap) * 1000,
-            (t_post - t_png) * 1000, routed, (t_done - t0) * 1000))
+    plog("translate: %dx%d%s png=%dB cap+png=%dms backend=%s route=%s total=%dms"
+         % (w, h, " rowdoubled" if rowdoubled else "", len(png),
+            (t_png - t0) * 1000, args.backend, routed, (t_done - t0) * 1000))
 
 
 def main():
     ap = argparse.ArgumentParser(description="MiSTer AI-translation PoC daemon")
+    ap.add_argument("--backend", choices=["service", "google"], default="service",
+                    help="service = AI-Service protocol URL (ztranslate/vgtranslate/"
+                         "mock); google = direct Vision+Translate, no server")
     ap.add_argument("--server", default="http://127.0.0.1:4404",
-                    help="AI-Service endpoint (vgtranslate/ztranslate/mock)")
+                    help="AI-Service endpoint for --backend service")
+    ap.add_argument("--google-key", default="",
+                    help="Google Cloud API key for --backend google")
     ap.add_argument("--mode", choices=["text", "image"], default="image",
                     help="default output mode for 'go' (default: image)")
     ap.add_argument("--source", default="ja", help="source language ('' = auto)")
     ap.add_argument("--target", default="en", help="target language")
-    ap.add_argument("--timeout", type=float, default=15.0, help="server timeout (s)")
+    ap.add_argument("--timeout", type=float, default=15.0, help="per-request timeout (s)")
     ap.add_argument("--png-level", type=int, default=1, help="zlib level (1=fast)")
     ap.add_argument("--osd-ms", type=int, default=8000, help="osd_msg display time")
     ap.add_argument("--fifo", default="/tmp/translate_cmd", help="trigger fifo")
@@ -194,14 +315,21 @@ def main():
                     help="single translate (using --mode) then exit; no fifo")
     args = ap.parse_args()
 
+    if args.backend == "google":
+        if not args.google_key:
+            sys.exit("--backend google needs --google-key (console.cloud.google.com,"
+                     " enable Vision + Translation APIs)")
+        args.mode = "text"  # image mode needs server-side rendering
+
     if args.once:
         translate_once(args, args.mode)
         return
 
     if not os.path.exists(args.fifo):
         os.mkfifo(args.fifo)
-    plog("translate: daemon up server=%s mode=%s fifo=%s" %
-         (args.server, args.mode, args.fifo))
+    plog("translate: daemon up backend=%s server=%s mode=%s fifo=%s" %
+         (args.backend, args.server if args.backend == "service" else "google-api",
+          args.mode, args.fifo))
 
     while True:
         # open() blocks until a writer appears; EOF when it closes - reopen

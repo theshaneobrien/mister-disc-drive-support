@@ -149,8 +149,41 @@ tool. Multiple simultaneous OSD messages: stock = one info window (a second
 host multiple text blocks, but the FPGA tints the whole window blue — for
 RPG-menu-style scattered labels, image mode is the right answer.
 
+## Real translation with NO self-hosted server (milestone 6)
+
+Most people won't run a server, so both cloud paths skip it entirely:
+
+**Option A — ztranslate.net (full image mode, zero code changes).** The
+hosted service by the RetroArch AI-Service author; does OCR + translation
++ renders the translated frame server-side. Free account at ztranslate.net
+→ API key → run the daemon with their URL (paste it exactly as their docs
+give it; our `output`/lang params append cleanly):
+
+```bash
+python3 translate_daemon.py --server "https://ztranslate.net/service?api_key=KEY" &
+echo image > /tmp/translate_cmd
+```
+
+**Option B — `--backend google` (direct-to-cloud, OSD text mode).** The
+daemon calls Google Vision (OCR) + Google Translate REST APIs straight
+from the MiSTer — no middleman at all. console.cloud.google.com → enable
+the Vision and Translation APIs → create an API key. Free tier: 1,000 OCR
+calls + 500k translated chars/month. The reply arrives as an OSD toast
+over the *running* game, word-wrapped for the 32-char window and
+auto-placed opposite the detected text (OCR bounding box top-half →
+toast at the bottom, and vice versa):
+
+```bash
+python3 translate_daemon.py --backend google --google-key AIza... &
+echo go > /tmp/translate_cmd
+```
+
+TLS note: python's urllib falls back to the rootfs CA bundle
+(/etc/ssl/certs/cacert.pem) if the default CA path is empty on the image.
+
 ## Next milestones (not in this branch)
 
 5. controller hotkey (evdev grab question) replacing the SSH/FIFO trigger
-6. real server: vgtranslate (Google Vision+Translate keys) or an
-   Interpreter-style offline stack (manga-ocr + Sugoi) on the LAN PC
+7. image mode without a render server: Main already links freetype via
+   imlib2 — an `overlay_text x y <str>` verb could draw translated text
+   boxes over the frozen frame using Vision's bounding boxes

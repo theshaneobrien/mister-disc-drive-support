@@ -81,8 +81,9 @@ int main(int argc, char *argv[])
 	sched_setaffinity(0, sizeof(set), &set);
 
 	// overlay PoC: stamp the running build into the telemetry so "which
-	// binary is actually flashed?" is always answerable from the log
-	perf_log("=== Main " VDATE " (overlay-poc v4) started ===");
+	// binary is actually flashed?" is always answerable from the log.
+	// compile time beats a hand-bumped label - it can't go stale.
+	perf_log("=== Main " VDATE " overlay-poc (built " __DATE__ " " __TIME__ ") started ===");
 
 	offload_start();
 

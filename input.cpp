@@ -2941,10 +2941,118 @@ static void assign_player(int dev, int num, int force = 0)
 	printf("Device %s %sassigned to player %d\n", input[dev].id, force ? "forcebly " : "", input[dev].num);
 }
 
+/*
+	Overlay PoC (milestone 5): configurable translate hotkey + any-button
+	dismiss. Main EVIOCGRABs every input device while a core runs, so this
+	is the only place a hotkey can live - and it's a good one: input_cb
+	sees every event from every device (keyboard or pad) before mapping.
+
+	Config: /media/fat/overlay/hotkey.cfg, first line one of
+	    314+315     two evdev codes = combo, fires when both are held
+	    68          one code = single key (68 = F10)
+	    learn       log every button press's code to /tmp/overlay_perf.log
+	Missing file = hotkey off (dismiss stays active). Loaded once per
+	process; core loads re-exec Main, so edits apply from the next core
+	start. Common codes: BTN_SELECT=314 BTN_START=315 BTN_TL=310
+	BTN_TR=311 KEY_F10=68 KEY_PAUSE=119.
+
+	Firing writes "go" into the translate daemon's fifo - identical to a
+	manual `echo go > /tmp/translate_cmd`, so the on-demand model (and its
+	quota guard) is unchanged. NOTE: the hotkey is observed, not consumed -
+	the core still receives the presses, so pick codes the game ignores.
+
+	Dismiss: while the bank-1 overlay is shown, any OTHER button press
+	(EV_KEY value 1) or d-pad hat movement hides it. Every other EV_ABS is
+	deliberately ignored so analog drift and gyro/accelerometer streams
+	(DS4 and friends) can never clear a translation mid-read.
+*/
+static void overlay_hotkey(struct input_event *ev)
+{
+	static int loaded = 0, learn = 0;
+	static int hk[2] = { 0, 0 };
+	static int held[2] = { 0, 0 };
+	static uint32_t warn_timer = 0;
+
+	if (!loaded)
+	{
+		loaded = 1;
+		FILE *f = fopen("/media/fat/overlay/hotkey.cfg", "r");
+		if (f)
+		{
+			char line[64] = {};
+			if (fgets(line, sizeof(line), f))
+			{
+				if (!strncmp(line, "learn", 5)) learn = 1;
+				else
+				{
+					char *plus = NULL;
+					hk[0] = strtol(line, &plus, 0);
+					if (plus && *plus == '+') hk[1] = strtol(plus + 1, NULL, 0);
+				}
+			}
+			fclose(f);
+			if (learn) perf_log("hotkey: LEARN mode - press buttons to see their codes");
+			else if (hk[1]) perf_log("hotkey: combo %d+%d", hk[0], hk[1]);
+			else if (hk[0]) perf_log("hotkey: key %d", hk[0]);
+		}
+	}
+
+	if (ev->type == EV_KEY)
+	{
+		if (learn)
+		{
+			if (ev->value == 1) perf_log("hotkey: learn code=%d", ev->code);
+			return;
+		}
+
+		if (hk[0] && (ev->code == hk[0] || ev->code == hk[1]))
+		{
+			int idx = (ev->code == hk[0]) ? 0 : 1;
+			if (ev->value == 1)
+			{
+				held[idx] = 1;
+				if (held[0] && (held[1] || !hk[1]) && !user_io_osd_is_visible())
+				{
+					held[0] = held[1] = 0; // re-fire needs fresh presses
+					int fd = open("/tmp/translate_cmd", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+					if (fd >= 0)
+					{
+						write(fd, "go\n", 3);
+						close(fd);
+						perf_log("hotkey: fired -> translate daemon");
+					}
+					else if (!warn_timer || CheckTimer(warn_timer))
+					{
+						warn_timer = GetTimer(10000);
+						perf_log("hotkey: fired but no daemon on /tmp/translate_cmd");
+					}
+				}
+			}
+			else if (!ev->value) held[idx] = 0;
+			return; // hotkey codes never double as dismiss keys
+		}
+
+		// any other button press clears a shown translation; the same
+		// press still reaches the game, so "press A to continue" both
+		// advances the dialogue and drops the old text - intended.
+		if (ev->value == 1 && video_overlay_state()) video_overlay_hide();
+		return;
+	}
+
+	// d-pad-as-hat dismisses too; sticks/gyro (all other ABS) never do
+	if (ev->type == EV_ABS && ev->value && video_overlay_state() &&
+		(ev->code == ABS_HAT0X || ev->code == ABS_HAT0Y))
+	{
+		video_overlay_hide();
+	}
+}
+
 static void input_cb(struct input_event *ev, struct input_absinfo *absinfo, int dev, bool menu_event)
 {
 	if (ev->type != EV_KEY && ev->type != EV_ABS && ev->type != EV_REL) return;
 	if (ev->type == EV_KEY && (!ev->code || ev->code == KEY_UNKNOWN)) return;
+
+	overlay_hotkey(ev);
 
 	static uint16_t last_axis = 0;
 

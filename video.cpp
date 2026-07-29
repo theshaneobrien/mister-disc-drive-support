@@ -4308,6 +4308,100 @@ static void overlay_draw_testpat(uint32_t *buf)
 			buf[y * fb_width + x] = 0xFFFF00FF;
 }
 
+static int overlay_dest_rect(int *dx, int *dy, int *dw, int *dh)
+{
+	// map the scaler's ACTIVE IMAGE area into fb coordinates, so a
+	// freeze-frame lands exactly over the live picture instead of being
+	// stretched to full screen - and so OCR coordinates in capture space
+	// map linearly into fb space. output_width/height come from the same
+	// DDR3 scaler header the capture reads; assumes the image is centered
+	// in the video mode (the scaler default; per-core crop/offset INI
+	// tweaks are outside PoC scope).
+	*dx = 0; *dy = 0; *dw = fb_width; *dh = fb_height;
+
+	mister_scaler *ms = mister_scaler_init();
+	if (!ms) return 0;
+	int out_w = ms->output_width;
+	int out_h = ms->output_height;
+	mister_scaler_free(ms);
+
+	int mode_w = v_cur.item[1];
+	int mode_h = v_cur.item[5];
+	if (out_w <= 0 || out_h <= 0 || mode_w <= 0 || mode_h <= 0) return 0;
+	if (out_w > mode_w) out_w = mode_w;
+	if (out_h > mode_h) out_h = mode_h;
+
+	*dw = out_w * fb_width / mode_w;
+	*dh = out_h * fb_height / mode_h;
+	*dx = (fb_width - *dw) / 2;
+	*dy = (fb_height - *dh) / 2;
+	return 1;
+}
+
+// scale src into the live-picture rect of a cached shadow buffer (borders
+// black), then one sequential pass into the uncached DDR bank - measured
+// ~2.5x faster than blitting the bank directly, and the shadow is where
+// region-only draws will slot in later. Frees only what it creates.
+static int overlay_present(Imlib_Image src, int src_w, int src_h, const char *tag, uint64_t t0)
+{
+	int dx, dy, dw, dh;
+	overlay_dest_rect(&dx, &dy, &dw, &dh);
+
+	uint32_t *shadow = (uint32_t*)malloc((size_t)fb_width * fb_height * 4);
+	if (!shadow)
+	{
+		perf_log("%s: shadow malloc failed (%dx%d)", tag, fb_width, fb_height);
+		return 0;
+	}
+	memset(shadow, 0, (size_t)fb_width * fb_height * 4);
+
+	Imlib_Image dst = imlib_create_image_using_data(fb_width, fb_height, shadow);
+	if (!dst)
+	{
+		free(shadow);
+		perf_log("%s: imlib wrap of shadow failed", tag);
+		return 0;
+	}
+
+	imlib_context_set_image(dst);
+	imlib_context_set_anti_alias(0); // crisp pixels for pixel art, and faster
+	imlib_context_set_blend(0);      // opaque copy, no per-pixel alpha cost
+	imlib_blend_image_onto_image(src, 0,
+		0, 0, src_w, src_h,
+		dx, dy, dw, dh);
+	imlib_free_image();              // the wrapper; shadow stays ours
+	uint64_t t_blit = perf_now_us();
+
+	memcpy((void*)(fb_base + (FB_SIZE * 1)), shadow, (size_t)fb_width * fb_height * 4);
+	free(shadow);
+	uint64_t t_copy = perf_now_us();
+
+	video_fb_enable(1, 1);
+	if (!fb_enabled)
+	{
+		perf_log("%s: enable REFUSED (core doesn't support HPS framebuffer)", tag);
+		return 0;
+	}
+	uint64_t t_en = perf_now_us();
+
+	// one vsync wait ~= when the first frame carrying the overlay starts
+	// scanout; blocks the main loop for at most a frame - acceptable
+	// diagnostics cost in a PoC
+	uint64_t t_vs = t_en;
+	int fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
+	if (fb >= 0)
+	{
+		int zero = 0;
+		if (ioctl(fb, FBIO_WAITFORVSYNC, &zero) != -1) t_vs = perf_now_us();
+		close(fb);
+	}
+
+	perf_log("%s: %dx%d -> rect %d,%d %dx%d (fb %dx%d) blit(cached)=%lluus copy(ddr)=%lluus enable=%lluus vsync=%lluus total=%lluus",
+		tag, src_w, src_h, dx, dy, dw, dh, fb_width, fb_height,
+		t_blit - t0, t_copy - t_blit, t_en - t_copy, t_vs - t_en, t_vs - t0);
+	return 1;
+}
+
 void video_overlay_show(const char *arg)
 {
 	uint64_t t0 = perf_now_us();
@@ -4327,79 +4421,44 @@ void video_overlay_show(const char *arg)
 
 	while (*arg == ' ' || *arg == '\t') arg++;
 
-	uint32_t *bank = (uint32_t*)(fb_base + (FB_SIZE * 1));
-
 	if (!*arg || !strcmp(arg, "testpat"))
 	{
-		overlay_draw_testpat(bank);
+		// diagnostic pattern: deliberately full-fb and direct-to-bank, so
+		// its draw time stays comparable across builds (the 43MB/s baseline)
+		overlay_draw_testpat((uint32_t*)(fb_base + (FB_SIZE * 1)));
 		perf_log("overlay_show: testpat %dx%d draw=%lluus", fb_width, fb_height, perf_now_us() - t0);
-	}
-	else
-	{
-		const char *path = (*arg == '/') ? arg : getFullPath(arg);
 
-		Imlib_Load_Error error = IMLIB_LOAD_ERROR_NONE;
-		Imlib_Image img = imlib_load_image_with_error_return(path, &error);
-		uint64_t t_load = perf_now_us();
-		if (!img)
+		uint64_t t_en0 = perf_now_us();
+		video_fb_enable(1, 1);
+		if (!fb_enabled)
 		{
-			perf_log("overlay_show: load '%s' FAILED err=%d (%lluus)", path, error, t_load - t0);
+			perf_log("overlay_show: enable REFUSED (core doesn't support HPS framebuffer)");
 			return;
 		}
-
-		imlib_context_set_image(img);
-		int src_w = imlib_image_get_width();
-		int src_h = imlib_image_get_height();
-
-		Imlib_Image dst = imlib_create_image_using_data(fb_width, fb_height, bank);
-		if (!dst)
-		{
-			imlib_free_image();
-			perf_log("overlay_show: imlib wrap of fb bank failed");
-			return;
-		}
-
-		imlib_context_set_image(dst);
-		imlib_context_set_anti_alias(0); // crisp pixels for pixel art, and faster
-		imlib_context_set_blend(0);      // opaque copy, no per-pixel alpha cost
-		imlib_blend_image_onto_image(img, 0,
-			0, 0, src_w, src_h,          // whole source
-			0, 0, fb_width, fb_height);  // scaled to the whole framebuffer
-		imlib_free_image();              // frees the wrapper, not the DDR bank
-
-		imlib_context_set_image(img);
-		imlib_free_image();
-
-		uint64_t t_blit = perf_now_us();
-		perf_log("overlay_show: '%s' %dx%d -> %dx%d load=%lluus blit=%lluus",
-			path, src_w, src_h, fb_width, fb_height, t_load - t0, t_blit - t_load);
-	}
-
-	uint64_t t_en0 = perf_now_us();
-	video_fb_enable(1, 1);
-	if (!fb_enabled)
-	{
-		// video_fb_enable already printed the reason (core lacks the HPS
-		// framebuffer reader in its gateware)
-		perf_log("overlay_show: enable REFUSED (core doesn't support HPS framebuffer)");
+		perf_log("overlay_show: enable=%lluus total=%lluus", perf_now_us() - t_en0, perf_now_us() - t0);
 		return;
 	}
-	uint64_t t_en1 = perf_now_us();
 
-	// one vsync wait ~= when the first frame carrying the overlay starts
-	// scanout; the ioctl blocks the main loop for at most a frame, which is
-	// acceptable diagnostics cost in a PoC
-	uint64_t t_vs = t_en1;
-	int fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
-	if (fb >= 0)
+	const char *path = (*arg == '/') ? arg : getFullPath(arg);
+
+	Imlib_Load_Error error = IMLIB_LOAD_ERROR_NONE;
+	Imlib_Image img = imlib_load_image_with_error_return(path, &error);
+	uint64_t t_load = perf_now_us();
+	if (!img)
 	{
-		int zero = 0;
-		if (ioctl(fb, FBIO_WAITFORVSYNC, &zero) != -1) t_vs = perf_now_us();
-		close(fb);
+		perf_log("overlay_show: load '%s' FAILED err=%d (%lluus)", path, error, t_load - t0);
+		return;
 	}
 
-	perf_log("overlay_show: enable=%lluus vsync=%lluus total=%lluus",
-		t_en1 - t_en0, t_vs - t_en1, t_vs - t0);
+	imlib_context_set_image(img);
+	int src_w = imlib_image_get_width();
+	int src_h = imlib_image_get_height();
+	perf_log("overlay_show: '%s' %dx%d load=%lluus", path, src_w, src_h, t_load - t0);
+
+	overlay_present(img, src_w, src_h, "overlay_show", t_load);
+
+	imlib_context_set_image(img);
+	imlib_free_image();
 }
 
 void video_overlay_hide()
@@ -4463,65 +4522,21 @@ void video_overlay_shot()
 	mister_scaler_read(ms, cap, ARGB32);
 	mister_scaler_free(ms);
 	uint64_t t_read = perf_now_us();
-
-	uint32_t *shadow = (uint32_t*)malloc((size_t)fb_width * fb_height * 4);
-	if (!shadow)
-	{
-		free(cap);
-		perf_log("overlay_shot: shadow malloc failed (%dx%d)", fb_width, fb_height);
-		return;
-	}
+	perf_log("overlay_shot: capture init=%lluus read=%lluus %dx%d", t_init - t0, t_read - t_init, src_w, src_h);
 
 	Imlib_Image src = imlib_create_image_using_data(src_w, src_h, (uint32_t*)cap);
-	Imlib_Image dst = imlib_create_image_using_data(fb_width, fb_height, shadow);
-	if (!src || !dst)
+	if (!src)
 	{
-		if (src) { imlib_context_set_image(src); imlib_free_image(); }
-		if (dst) { imlib_context_set_image(dst); imlib_free_image(); }
-		free(shadow);
 		free(cap);
-		perf_log("overlay_shot: imlib wrap failed");
+		perf_log("overlay_shot: imlib wrap of capture failed");
 		return;
 	}
 
-	imlib_context_set_image(dst);
-	imlib_context_set_anti_alias(0);
-	imlib_context_set_blend(0);
-	imlib_blend_image_onto_image(src, 0,
-		0, 0, src_w, src_h,
-		0, 0, fb_width, fb_height);
-	imlib_free_image();              // dst wrapper; shadow stays ours
+	overlay_present(src, src_w, src_h, "overlay_shot", t_read);
+
 	imlib_context_set_image(src);
 	imlib_free_image();
-	uint64_t t_blit = perf_now_us();
-
-	memcpy((void*)(fb_base + (FB_SIZE * 1)), shadow, (size_t)fb_width * fb_height * 4);
-	uint64_t t_copy = perf_now_us();
-
-	free(shadow);
 	free(cap);
-
-	video_fb_enable(1, 1);
-	if (!fb_enabled)
-	{
-		perf_log("overlay_shot: enable REFUSED (core doesn't support HPS framebuffer)");
-		return;
-	}
-	uint64_t t_en = perf_now_us();
-
-	uint64_t t_vs = t_en;
-	int fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
-	if (fb >= 0)
-	{
-		int zero = 0;
-		if (ioctl(fb, FBIO_WAITFORVSYNC, &zero) != -1) t_vs = perf_now_us();
-		close(fb);
-	}
-
-	perf_log("overlay_shot: %dx%d -> %dx%d init=%lluus read=%lluus blit(cached)=%lluus copy(ddr)=%lluus enable=%lluus vsync=%lluus total=%lluus",
-		src_w, src_h, fb_width, fb_height,
-		t_init - t0, t_read - t_init, t_blit - t_read, t_copy - t_blit,
-		t_en - t_copy, t_vs - t_en, t_vs - t0);
 }
 
 void video_cmd(char *cmd)

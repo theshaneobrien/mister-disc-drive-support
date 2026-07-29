@@ -87,42 +87,52 @@ def capture(stale_timeout=0.35):
     tick. A static counter means we'd ship a stale frame - seen on
     hardware as capturing our own displayed overlay and re-translating it
     forever. Better to refuse (and say so) than to spend quota on it.
-    """
-    with open("/dev/mem", "rb") as f:
-        m = mmap.mmap(f.fileno(), SCALER_SIZE, mmap.MAP_SHARED,
-                      mmap.PROT_READ, offset=SCALER_BASE)
-        try:
-            if m[0] != 1 or m[1] != 1:
-                raise RuntimeError("scaler buffer not valid - is a core running?")
-            fc = m[5]
-            deadline = time.monotonic() + stale_timeout
-            while m[5] == fc:
-                if time.monotonic() > deadline:
-                    raise RuntimeError(
-                        "scaler buffer not updating (frame counter static at %d)"
-                        " - overlay still shown, or the scaler dump is wedged" % fc)
-                time.sleep(0.01)
 
-            rows = None
-            for _ in range(4):
-                hdr = m[0:16]
-                if hdr[0] != 1 or hdr[1] != 1:
-                    raise RuntimeError("scaler buffer not valid - is a core running?")
-                off = (hdr[2] << 8) | hdr[3]
-                fc0 = hdr[5]
-                w = (hdr[6] << 8) | hdr[7]
-                h = (hdr[8] << 8) | hdr[9]
-                line = (hdr[10] << 8) | hdr[11]
-                ow = (hdr[12] << 8) | hdr[13]
-                oh = (hdr[14] << 8) | hdr[15]
-                if not (0 < w <= 2048 and 0 < h <= 1024):
-                    raise RuntimeError("implausible frame %dx%d" % (w, h))
-                rows = [m[off + y * line: off + y * line + w * 3] for y in range(h)]
-                if m[5] == fc0:  # no new frame landed mid-copy
-                    break
-            return w, h, ow, oh, rows
-        finally:
-            m.close()
+    O_SYNC matters: Main's shmem_map opens /dev/mem with it, which maps
+    the region uncached. The FPGA writes this RAM behind the CPU's back,
+    so a cacheable mapping can serve stale lines indefinitely - even
+    across daemon restarts (hardware caches outlive processes). Suspected
+    cause of the frozen-capture bug seen on hardware 2026-07-29.
+    """
+    fd = os.open("/dev/mem", os.O_RDONLY | os.O_SYNC)
+    try:
+        m = mmap.mmap(fd, SCALER_SIZE, mmap.MAP_SHARED,
+                      mmap.PROT_READ, offset=SCALER_BASE)
+    finally:
+        os.close(fd)
+
+    try:
+        if m[0] != 1 or m[1] != 1:
+            raise RuntimeError("scaler buffer not valid - is a core running?")
+        fc = m[5]
+        deadline = time.monotonic() + stale_timeout
+        while m[5] == fc:
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    "scaler buffer not updating (frame counter static at %d)"
+                    " - overlay still shown, or the scaler dump is wedged" % fc)
+            time.sleep(0.01)
+
+        rows = None
+        for _ in range(4):
+            hdr = m[0:16]
+            if hdr[0] != 1 or hdr[1] != 1:
+                raise RuntimeError("scaler buffer not valid - is a core running?")
+            off = (hdr[2] << 8) | hdr[3]
+            fc0 = hdr[5]
+            w = (hdr[6] << 8) | hdr[7]
+            h = (hdr[8] << 8) | hdr[9]
+            line = (hdr[10] << 8) | hdr[11]
+            ow = (hdr[12] << 8) | hdr[13]
+            oh = (hdr[14] << 8) | hdr[15]
+            if not (0 < w <= 2048 and 0 < h <= 1024):
+                raise RuntimeError("implausible frame %dx%d" % (w, h))
+            rows = [m[off + y * line: off + y * line + w * 3] for y in range(h)]
+            if m[5] == fc0:  # no new frame landed mid-copy
+                break
+        return w, h, ow, oh, rows
+    finally:
+        m.close()
 
 
 def png_encode(w, h, rows, level=1):

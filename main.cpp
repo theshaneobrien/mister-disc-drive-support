@@ -38,6 +38,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "offload.h"
 #include "achievements.h"
 #include "support/physcd/physcd_autoboot.h"
+#include "perf_log.h"
 
 const char *version = "$VER:" VDATE;
 
@@ -79,6 +80,10 @@ int main(int argc, char *argv[])
 	CPU_ZERO(&set);
 	CPU_SET(1, &set);
 	sched_setaffinity(0, sizeof(set), &set);
+
+	// overlay PoC: stamp the running build into the telemetry so "which
+	// binary is actually flashed?" is always answerable from the log
+	perf_log("=== Main " VDATE " (overlay-poc v4) started ===");
 
 	offload_start();
 

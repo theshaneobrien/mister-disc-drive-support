@@ -54,7 +54,11 @@ SCALER_BASE = 0x20000000
 SCALER_SIZE = 2048 * 3 * 1024
 MISTER_CMD = "/dev/MiSTer_cmd"
 PERF_LOG = "/tmp/overlay_perf.log"
-TRANSLATED_PNG = "/tmp/translated.png"
+# unique path per translation: Main's imlib2 caches decoded images BY FILE
+# PATH, so rewriting one filename displayed translation #1 forever (fixed
+# properly in Main overlaypoc5 via decache; rotating names keeps older
+# binaries honest too, and never reuses a path within a boot)
+TRANSLATED_PNG_FMT = "/tmp/translated_%06d.png"
 CA_FALLBACK = "/etc/ssl/certs/cacert.pem"  # MiSTer rootfs CA bundle
 
 VISION_URL = "https://vision.googleapis.com/v1/images:annotate?key=%s"
@@ -233,11 +237,18 @@ def backend_service(args, mode, png):
         osd_show(args, "AI: " + reply["error"])
         return "error"
     if mode == "image" and reply.get("image"):
-        with open(TRANSLATED_PNG, "wb") as f:
+        _shot_seq[0] += 1
+        path = TRANSLATED_PNG_FMT % _shot_seq[0]
+        with open(path, "wb") as f:
             f.write(base64.b64decode(reply["image"]))
-        mister("overlay_show " + TRANSLATED_PNG)
+        mister("overlay_show " + path)
         _overlay_shown[0] = True
-        return "image(%dB)" % len(reply["image"])
+        if _shot_seq[0] > 1:
+            try:
+                os.unlink(TRANSLATED_PNG_FMT % (_shot_seq[0] - 1))
+            except OSError:
+                pass
+        return "image(%dB) -> %s" % (len(reply["image"]), path)
     if reply.get("text"):
         osd_show(args, wrap_for_osd(reply["text"]))
         return "text(%dch)" % len(reply["text"])
@@ -315,6 +326,7 @@ def ensure_fifo(path):
 
 _last_translate = [0.0]
 _overlay_shown = [False]
+_shot_seq = [0]
 
 
 def translate_once(args, mode):

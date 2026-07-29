@@ -69,7 +69,7 @@ jobs:
           cp wrapper/translate/README.md                  sd/translate/
           cp wrapper/translate/Scripts/SetTranslateHotkey.sh sd/Scripts/
           (cd sd && zip -r ../MiSTer-translate-install.zip .)
-          unzip -l MiSTer-translate-install.zip
+          zip -sf MiSTer-translate-install.zip
 
       - name: Attach to the Gitea release
         if: startsWith(github.ref, 'refs/tags/')

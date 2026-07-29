@@ -77,16 +77,32 @@ def mister(cmd):
         f.write(cmd + "\n")
 
 
-def capture():
+def capture(stale_timeout=0.35):
     """Read the current frame from the scaler DDR3 buffer.
 
     Returns (width, height, out_w, out_h, rows[RGB888 bytes per row]).
     Retries a few times if the frame counter moved mid-copy (tearing).
+
+    The scaler rewrites this buffer every core frame, so its counter must
+    tick. A static counter means we'd ship a stale frame - seen on
+    hardware as capturing our own displayed overlay and re-translating it
+    forever. Better to refuse (and say so) than to spend quota on it.
     """
     with open("/dev/mem", "rb") as f:
         m = mmap.mmap(f.fileno(), SCALER_SIZE, mmap.MAP_SHARED,
                       mmap.PROT_READ, offset=SCALER_BASE)
         try:
+            if m[0] != 1 or m[1] != 1:
+                raise RuntimeError("scaler buffer not valid - is a core running?")
+            fc = m[5]
+            deadline = time.monotonic() + stale_timeout
+            while m[5] == fc:
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        "scaler buffer not updating (frame counter static at %d)"
+                        " - overlay still shown, or the scaler dump is wedged" % fc)
+                time.sleep(0.01)
+
             rows = None
             for _ in range(4):
                 hdr = m[0:16]
@@ -210,6 +226,7 @@ def backend_service(args, mode, png):
         with open(TRANSLATED_PNG, "wb") as f:
             f.write(base64.b64decode(reply["image"]))
         mister("overlay_show " + TRANSLATED_PNG)
+        _overlay_shown[0] = True
         return "image(%dB)" % len(reply["image"])
     if reply.get("text"):
         osd_show(args, wrap_for_osd(reply["text"]))
@@ -287,6 +304,7 @@ def ensure_fifo(path):
 
 
 _last_translate = [0.0]
+_overlay_shown = [False]
 
 
 def translate_once(args, mode):
@@ -297,6 +315,13 @@ def translate_once(args, mode):
         plog("translate: SKIPPED (repeat within %.1fs min-interval)" % args.min_interval)
         return
     _last_translate[0] = now
+
+    # translating the NEXT screen means un-freezing the last one first -
+    # otherwise the capture sees our own overlay (translation recursion)
+    if _overlay_shown[0]:
+        mister("overlay_hide")
+        _overlay_shown[0] = False
+        time.sleep(0.08)  # ~2 frames for core video to resume
 
     t0 = time.monotonic()
     try:
@@ -376,6 +401,7 @@ def main():
                     return
                 elif cmd == "hide":
                     mister("overlay_hide")
+                    _overlay_shown[0] = False
                 elif cmd in ("go", "text", "image"):
                     translate_once(args, args.mode if cmd == "go" else cmd)
                 else:

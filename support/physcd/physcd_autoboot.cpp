@@ -17,6 +17,7 @@
 #include "../../hardware.h"
 #include "../../cfg.h"
 #include "../../bootcore.h"
+#include "../arcade/mra_loader.h"
 #include "../megacd/megacd.h"
 #include "../psx/psx.h"
 #include "../saturn/saturn.h"
@@ -38,9 +39,11 @@ extern const char *getRootDir();
 /* both survive the exec, which is the whole point - see the header */
 #define MARKER "/tmp/physcd_autoboot"   /* phase A -> phase B, one-shot   */
 #define BOOTED "/tmp/physcd_booted"     /* what we last booted from disc  */
+#define TIPFILE "config/physcd_sidecar_tip"  /* sd card: once-EVER, never nags */
 
 static unsigned long pending_mount = 0;
 static physcd_disc_t pending_type = PHYSCD_DISC_NONE;
+static unsigned long sidecar_mount = 0;   /* side-by-side automount dwell */
 
 /* shared PHYSCD_*_CORE ini-value parser: which mountable console a
    config string names. an empty or unknown value falls back to dflt. */
@@ -230,6 +233,69 @@ int physcd_swap_current_core(void)
 
 // ------------------------------------------------------ phase B: new core
 
+/* ---------------------------------------------------- side-by-side mode
+ *
+ * installed as /media/fat/MiSTer_Disc (or dropped over MiSTer_RA), the
+ * binary is reached through stock MiSTer's per-core main= routing (a
+ * [CD-*] section, or the RA_* routing that already exists on odelot
+ * setups) instead of replacing /media/fat/MiSTer. the stock menu runs the
+ * menu, so none of the menu-side disc logic exists - a routed core launch
+ * has to mount the physical disc itself. that is this feature. a full
+ * install never takes this path: its basename IS "MiSTer", and the menu
+ * owns disc logic there exactly as before.
+ */
+
+static int routed_main(void)
+{
+	const char *app = getappname();          /* /proc/self/exe, absolute */
+	if (!app || !*app) return 0;             /* readlink failed: fail CLOSED
+	                                            (full-install behavior) */
+	const char *base = strrchr(app, '/');
+	base = base ? base + 1 : app;
+	/* a binary replaced on disk mid-session reads "MiSTer (deleted)":
+	   compare the name only, up to the first space */
+	size_t n = strcspn(base, " ");
+	return !(n == 6 && !strncmp(base, "MiSTer", 6));
+}
+
+static void sidecar_arm(void)
+{
+	if (!routed_main()) return;           /* full install: menu owns discs */
+	if (!cfg.physcd_autoboot) return;     /* manual-only by choice; the
+	                                         mount_phys fifo still works  */
+
+	/* the same seven cores physcd_mount_current_core can serve */
+	if (!(is_megacd() || is_psx() || is_saturn() || is_neogeo()
+	      || is_3do() || is_pce() || is_cdi())) return;
+
+	/* a game MGL: the user picked a FILE, do not mount over it. the
+	   items have not loaded yet at startup time (they run on delays in
+	   the menu state machine), so ask the parsed list, not the cores. */
+	mgl_struct *mgl = mgl_get();
+	if (mgl) for (int i = 0; i < mgl->count; i++)
+		if (mgl->item[i].action == MGL_ACTION_LOAD) return;
+
+	/* no cd hardware at all: stay out of the way, zero cost */
+	int have = 0;
+	for (int i = 0; i < 8 && !have; i++)
+	{
+		char dev[16];
+		snprintf(dev, sizeof(dev), "/dev/sr%d", i);
+		if (!access(dev, R_OK)) have = 1;
+	}
+	if (!have) return;
+
+	/* open now - this can block seconds on a spinning-up drive, which is
+	   fine at startup (same reasoning as the menu watcher's open below).
+	   the PRESENCE decision waits for the poll: the settle dwell doubles
+	   as cold-drive wake time, and presence at mount time is the truth
+	   that matters. */
+	physcd_open(NULL);
+	sidecar_mount = GetTimer(cfg.physcd_mount_delay * 1000);
+	printf("physcd: routed main (%s) - checking the drive in %ds\n",
+		getappname(), cfg.physcd_mount_delay);
+}
+
 void physcd_autoboot_startup(void)
 {
 	int want = 0;
@@ -257,8 +323,14 @@ void physcd_autoboot_startup(void)
 		   block for seconds on a spinning-up drive, which is fine
 		   during boot but would freeze the ui if the menu tick did
 		   it. after this the tick only polls an event, in O(1). */
-		if (is_menu()) physcd_watch_start();
-		return;                      /* a core loaded by hand: leave it alone */
+		if (is_menu()) { physcd_watch_start(); return; }
+
+		/* not the menu and no marker. on a full install that is a core
+		   loaded by hand: leave it alone. as a ROUTED alternate main a
+		   marker cannot exist (the stock menu ran the exec chain), so
+		   this is the side-by-side launch path - automount. */
+		sidecar_arm();
+		return;
 	}
 
 	if (fscanf(f, "%d", &want) != 1) want = 0;
@@ -293,6 +365,51 @@ void physcd_autoboot_startup(void)
 
 void physcd_autoboot_poll(void)
 {
+	/* side-by-side automount (armed by sidecar_arm; never set on a full
+	   install). presence is decided HERE, after the dwell. */
+	if (sidecar_mount && CheckTimer(sidecar_mount))
+	{
+		sidecar_mount = 0;
+
+		if (!physcd_disc_present())
+		{
+			/* empty drive: the user launched the core for something
+			   else. release the fd/prefetch thread/cache and stay
+			   SILENT - no disc is not an error, and this must never
+			   become a nag. */
+			printf("physcd: routed automount - no disc, standing down\n");
+			physcd_close();
+			return;
+		}
+
+		int ok = physcd_mount_current_core();
+		if (is_pce() && menu_present()) MenuHide();   /* same as marker flow */
+
+		if (ok)
+		{
+			char msg[192];
+			const char *id = is_psx() ? psx_get_game_id() : NULL;
+			if (id && *id) snprintf(msg, sizeof(msg), "Disc mounted\n%s", id);
+			else snprintf(msg, sizeof(msg), "Disc mounted");
+
+			if (!FileExists(TIPFILE) && FileSave(TIPFILE, (void*)"1", 1))
+			{
+				/* once EVER, marker on the sd card - never per-boot,
+				   never again. deleting the file is the only way back.
+				   marker write is checked FIRST: if it cannot persist
+				   (read-only card), the tip does not show at all -
+				   once-ever-or-nothing, never a repeat. */
+				size_t len = strlen(msg);
+				snprintf(msg + len, sizeof(msg) - len,
+					"\nTip: full install adds\ninsert-and-play autoboot");
+				Info(msg, 7000);
+			}
+			else Info(msg, 3000);
+		}
+		else Info("Disc could not be read", 5000);
+		return;
+	}
+
 	if (!pending_mount || !CheckTimer(pending_mount)) return;
 	pending_mount = 0;
 

@@ -43,9 +43,10 @@ never needs a reflash:
 - **Aspect fix**: row-doubles anamorphic hi-res modes (SNES 512×224) so
   OCR sees sane glyph shapes.
 - **PNG encode**: minimal stdlib writer (zlib level 1).
-- **Backends**: `service` = RetroArch AI-Service protocol
-  (ztranslate/vgtranslate/mock — one URL swap apart); `google` = direct
-  Vision+Translate REST (OSD text only).
+- **Backend**: the RetroArch AI-Service protocol, one URL swap between
+  the hosted ztranslate.net (de-facto), a LAN vgtranslate/mock, or an
+  eventual self-hosted server (milestone 11). A direct-Google backend
+  existed briefly and was cut 2026-07-30 — one protocol, one path.
 - **Reply routing**: image → unique `/tmp/translated_N.png` (unique
   *path* per round — see imlib rule) → `overlay_show`; text → wrapped
   30-col, OSD-placed opposite the OCR bounding box.

@@ -2,22 +2,13 @@
 """MiSTer on-the-fly translation daemon.
 
 Captures the current core frame straight from the scaler buffer in DDR3
-(passive mmap - the core is untouched), and translates it via one of two
-backends, both usable WITHOUT self-hosting anything:
+(passive mmap - the core is untouched) and POSTs it to a RetroArch
+AI-Service-protocol endpoint. The de-facto backend is the hosted
+ztranslate.net (free account + API key -> full IMAGE mode, translation
+rendered server-side); any protocol-compatible server works the same:
 
-  --backend service   (default) RetroArch-AI-Service protocol POST.
-                      Works with the hosted ztranslate.net (free account +
-                      API key -> full IMAGE mode, translation rendered
-                      server-side), a LAN vgtranslate, or mock_server.py:
-                        --server "https://ztranslate.net/service?api_key=KEY"
-                        --server "http://<pc>:4404"
-
-  --backend google    Direct-to-cloud: Google Vision OCR + Google Translate
-                      REST APIs, called straight from the MiSTer. No server
-                      anywhere. TEXT mode: result appears as an OSD toast
-                      over the running game, auto-placed opposite the
-                      detected text. Needs --google-key (free tier: 1k OCR
-                      calls + 500k translated chars/month).
+    SERVER=https://ztranslate.net/service   (+ API_KEY=...)
+    SERVER=http://<lan-box>:4404            (vgtranslate / mock / own server)
 
 Replies route through Main's FIFO verbs: text -> osd_msg (live game),
 image -> overlay_show of a rotating /tmp/translated_N.png (freeze-frame).
@@ -62,9 +53,6 @@ PERF_LOG = "/tmp/overlay_perf.log"
 # binaries honest too, and never reuses a path within a boot)
 TRANSLATED_PNG_FMT = "/tmp/translated_%06d.png"
 CA_FALLBACK = "/etc/ssl/certs/cacert.pem"  # MiSTer rootfs CA bundle
-
-VISION_URL = "https://vision.googleapis.com/v1/images:annotate?key=%s"
-GTRANSLATE_URL = "https://translation.googleapis.com/language/translate/v2?key=%s"
 
 
 def plog(msg):
@@ -182,9 +170,8 @@ def http_post_json(url, obj, timeout):
 
 def capture_png(args):
     """Grab a frame, fix anamorphic aspect, PNG it.
-    Returns (png_bytes, w, h, rowdoubled, native_h)."""
+    Returns (png_bytes, w, h, rowdoubled)."""
     w, h, ow, oh, rows = capture()
-    native_h = h
     rowdoubled = False
     # anamorphic hi-res modes (e.g. SNES 512x224) squish glyphs; give the
     # OCR square-ish pixels by doubling rows. Cheap: pure row duplication.
@@ -192,7 +179,7 @@ def capture_png(args):
         rows = [r for r in rows for _ in (0, 1)]
         h *= 2
         rowdoubled = True
-    return png_encode(w, h, rows, level=args.png_level), w, h, rowdoubled, native_h
+    return png_encode(w, h, rows, level=args.png_level), w, h, rowdoubled
 
 
 def wrap_for_osd(text, width=30, max_lines=14):
@@ -212,12 +199,11 @@ def sanitize_osd(text):
     return t.strip() or "(empty reply)"
 
 
-def osd_show(args, text, y=None):
-    pos = ("-y %d " % y) if y is not None else ""
-    mister("osd_msg -f 1 -t %d %s%s" % (args.osd_ms, pos, sanitize_osd(text)))
+def osd_show(args, text):
+    mister("osd_msg -f 1 -t %d %s" % (args.osd_ms, sanitize_osd(text)))
 
 
-# ---------------------------------------------------------------- backends
+# ---------------------------------------------------------------- backend
 
 def backend_service(args, mode, png):
     """RetroArch-AI-Service protocol (ztranslate / vgtranslate / mock)."""
@@ -260,54 +246,6 @@ def backend_service(args, mode, png):
         mister("osd_msg -t 3000 AI: no text found")
         return "notext"
     return "nothing"
-
-
-def backend_google(args, mode, png, rowdoubled, native_h):
-    """Direct-to-cloud: Vision OCR then Translate, result as OSD text.
-    (image mode needs server-side rendering - use ztranslate for that.)"""
-    t0 = time.monotonic()
-
-    vreq = {"requests": [{
-        "image": {"content": base64.b64encode(png).decode()},
-        "features": [{"type": "TEXT_DETECTION"}],
-    }]}
-    if args.source:
-        vreq["requests"][0]["imageContext"] = {"languageHints": [args.source]}
-
-    vresp = http_post_json(VISION_URL % args.google_key, vreq, args.timeout)
-    r0 = (vresp.get("responses") or [{}])[0]
-    if "error" in r0:
-        raise RuntimeError("Vision: %s" % r0["error"].get("message", "?"))
-    full = r0.get("fullTextAnnotation", {}).get("text", "").strip()
-    t_vision = time.monotonic()
-
-    if not full:
-        mister("osd_msg -t 3000 AI: no text found")
-        return "notext (vision=%dms)" % ((t_vision - t0) * 1000)
-
-    # where is the text? place the OSD toast in the opposite half so the
-    # translation doesn't sit on top of the original dialogue box
-    y_osd = None
-    try:
-        verts = r0["textAnnotations"][0]["boundingPoly"]["vertices"]
-        ys = [v.get("y", 0) for v in verts]
-        mid = (min(ys) + max(ys)) / 2.0
-        if rowdoubled:
-            mid /= 2.0
-        y_osd = 10 if mid > native_h / 2.0 else max(10, native_h - 70)
-    except (KeyError, IndexError):
-        pass
-
-    treq = {"q": full, "target": args.target or "en", "format": "text"}
-    if args.source:
-        treq["source"] = args.source
-    tresp = http_post_json(GTRANSLATE_URL % args.google_key, treq, args.timeout)
-    translated = tresp["data"]["translations"][0]["translatedText"]
-    t_trans = time.monotonic()
-
-    osd_show(args, wrap_for_osd(translated), y=y_osd)
-    return "text(%dch) vision=%dms translate=%dms osd_y=%s" % (
-        len(translated), (t_vision - t0) * 1000, (t_trans - t_vision) * 1000, y_osd)
 
 
 # ---------------------------------------------------------------- pipeline
@@ -358,7 +296,7 @@ def translate_once(args, mode):
 
     t0 = time.monotonic()
     try:
-        png, w, h, rowdoubled, native_h = capture_png(args)
+        png, w, h, rowdoubled = capture_png(args)
     except (RuntimeError, OSError) as e:
         plog("translate: capture FAILED: %s" % e)
         mister("osd_msg -t 4000 AI: capture failed")
@@ -366,19 +304,16 @@ def translate_once(args, mode):
     t_png = time.monotonic()
 
     try:
-        if args.backend == "google":
-            routed = backend_google(args, mode, png, rowdoubled, native_h)
-        else:
-            routed = backend_service(args, mode, png)
+        routed = backend_service(args, mode, png)
     except Exception as e:  # HTTP/ssl/JSON shape - all end the same way
         plog("translate: backend FAILED: %s" % e)
         osd_show(args, "AI: server error\n" + str(e)[:80])
         return
 
     t_done = time.monotonic()
-    plog("translate: %dx%d%s png=%dB cap+png=%dms backend=%s route=%s total=%dms"
+    plog("translate: %dx%d%s png=%dB cap+png=%dms route=%s total=%dms"
          % (w, h, " rowdoubled" if rowdoubled else "", len(png),
-            (t_png - t0) * 1000, args.backend, routed, (t_done - t0) * 1000))
+            (t_png - t0) * 1000, routed, (t_done - t0) * 1000))
 
 
 def load_ini(path):
@@ -427,20 +362,14 @@ def main():
         except ValueError:
             sys.exit("translate.ini: bad value for %s: %r" % (key, ini.get(key)))
 
-    ap = argparse.ArgumentParser(description="MiSTer AI-translation PoC daemon",
+    ap = argparse.ArgumentParser(description="MiSTer on-the-fly translation daemon",
                                  parents=[pre])
-    ap.add_argument("--backend", choices=["service", "google"],
-                    default=d("BACKEND", "service"),
-                    help="service = AI-Service protocol URL (ztranslate/vgtranslate/"
-                         "mock); google = direct Vision+Translate, no server")
     ap.add_argument("--server", default=d("SERVER", "https://ztranslate.net/service"),
-                    help="AI-Service endpoint for --backend service")
+                    help="AI-Service-protocol endpoint (ztranslate/vgtranslate/own)")
     ap.add_argument("--api-key", default=d("API_KEY", ""),
-                    help="appended as api_key= to --server (service backend)")
+                    help="appended to --server as api_key=")
     ap.add_argument("--zt-mode", default=d("ZT_MODE", ""),
                     help="ztranslate speed/quality: normal (default) or fast")
-    ap.add_argument("--google-key", default=d("GOOGLE_KEY", ""),
-                    help="Google Cloud API key for --backend google")
     ap.add_argument("--mode", choices=["text", "image"], default=d("MODE", "image"),
                     help="default output mode for 'go' (default: image)")
     ap.add_argument("--source", default=d("SOURCE_LANG", "ja"),
@@ -459,14 +388,8 @@ def main():
                     help="single translate (using --mode) then exit; no fifo")
     args = ap.parse_args()
 
-    if args.backend == "service" and args.api_key and "api_key=" not in args.server:
+    if args.api_key and "api_key=" not in args.server:
         args.server += ("&" if "?" in args.server else "?") + "api_key=" + args.api_key
-
-    if args.backend == "google":
-        if not args.google_key:
-            sys.exit("--backend google needs --google-key / GOOGLE_KEY in translate.ini"
-                     " (console.cloud.google.com, enable Vision + Translation APIs)")
-        args.mode = "text"  # image mode needs server-side rendering
 
     if args.once:
         translate_once(args, args.mode)
@@ -474,10 +397,9 @@ def main():
 
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
     ensure_fifo(args.fifo)
-    plog("translate: daemon up pid=%d backend=%s server=%s mode=%s lang=%s->%s%s" %
-         (os.getpid(), args.backend,
-          redact(args.server) if args.backend == "service" else "google-api",
-          args.mode, args.source or "auto", args.target,
+    plog("translate: daemon up pid=%d server=%s mode=%s lang=%s->%s%s" %
+         (os.getpid(), redact(args.server), args.mode,
+          args.source or "auto", args.target,
           (" zt_mode=" + args.zt_mode) if args.zt_mode else ""))
     plog("translate: trigger: echo image|text|go|hide > %s   stop: echo quit > %s (or kill %d)"
          % (args.fifo, args.fifo, os.getpid()))

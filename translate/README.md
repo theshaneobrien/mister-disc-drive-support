@@ -72,7 +72,6 @@ echo quit   > /tmp/translate_cmd
 | `MODE` | `image` | `image` freeze-frame / `text` OSD toast |
 | `MIN_INTERVAL` | `2.0` | min seconds between translations (quota guard) |
 | `OSD_MS` | `8000` | text-mode display time |
-| `BACKEND` / `GOOGLE_KEY` | `service` | `google` = direct Vision+Translate, OSD text only |
 
 CLI args override the ini (`python3 translate_daemon.py --help`).
 

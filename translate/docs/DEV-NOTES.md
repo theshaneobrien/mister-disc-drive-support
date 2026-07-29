@@ -244,18 +244,28 @@ Behavior, by design:
   presses. Pick codes your game ignores (or a keyboard key). True
   consumption needs delayed forwarding — future refinement.
 
-## Next milestones (not in this branch)
+## Next milestones
 
-7. image mode without a render server: Main already links freetype via
-   imlib2 — an `overlay_text x y <str>` verb could draw translated text
-   boxes over the frozen frame using Vision's bounding boxes
+7. ~~image mode without a render server (freetype `overlay_text` +
+   Vision boxes)~~ **CUT 2026-07-30**: it depended on the google
+   backend for OCR box coordinates; ztranslate returns finished
+   images (no boxes), and an own server (11) renders server-side
+   anyway — client-side rendering solves a problem we no longer have
 8. side-by-side install via MGL launchers instead of replacing
    /media/fat/MiSTer — the physcd sidecar already proved the mechanism
    (`main=` ini routing + alternate binary name + `routed_main()`
    basename detection); the overlay binary could ship the same way
-9. google backend A/B (Vision may crack the stylized fonts ztranslate
-   declines; exercises OSD text mode + smart placement)
-10. MultiDatabases distribution (after 8): the disc project's entry at
-    theypsilon/MultiDatabases_MiSTer/physical-disc is the template —
-    the downloader natively distributes file trees shaped like our
-    install zip, and the binary ships as a side-by-side alternate main
+9. ~~google backend A/B~~ **CUT 2026-07-30**: ztranslate is the
+   de-facto backend (Shane); the google code path + ini keys were
+   removed from the daemon the same day — one protocol, one path
+10. MultiDatabases distribution (after 8): the disc project's entry
+    (shipped with physcd v0.6.0) is the template — the downloader
+    natively distributes file trees shaped like our install zip, and
+    the binary ships as a side-by-side alternate main
+11. **self-hosted, shareable ztranslate-compatible server**: a docker
+    image anyone can run (unraid/Pi/VPS) speaking the AI-Service
+    protocol — OCR (manga-ocr, game/manga-tuned) + local MT (Sugoi V4
+    or NLLB-int8) + PIL in-place rendering. mock_server.py is the
+    protocol seed; the research priced the stack at ~1.5GB models on
+    Pi-4-class hardware. Bonus: it serves stock RetroArch users too
+    (same protocol), which makes it worth sharing on its own

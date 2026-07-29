@@ -38,6 +38,7 @@ import base64
 import json
 import mmap
 import os
+import re
 import signal
 import ssl
 import stat
@@ -229,6 +230,8 @@ def backend_service(args, mode, png):
         q["source_lang"] = args.source
     if args.target:
         q["target_lang"] = args.target
+    if args.zt_mode:
+        q["mode"] = args.zt_mode  # ztranslate: normal (default) | fast
     url = args.server + ("&" if "?" in args.server else "?") + urllib.parse.urlencode(q)
 
     reply = http_post_json(url, body, args.timeout)
@@ -370,33 +373,81 @@ def translate_once(args, mode):
             (t_png - t0) * 1000, args.backend, routed, (t_done - t0) * 1000))
 
 
+def load_ini(path):
+    """Flat KEY=VALUE settings file, '#' comments. Shell-sourceable too, so
+    translate_start.sh can grep ENABLED without a python round trip."""
+    vals = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                vals[k.strip().upper()] = v.split("#", 1)[0].strip()
+    except OSError:
+        pass
+    return vals
+
+
+def redact(url):
+    return re.sub(r"(api_key=)[^&]+", r"\1***", url)
+
+
 def main():
-    ap = argparse.ArgumentParser(description="MiSTer AI-translation PoC daemon")
-    ap.add_argument("--backend", choices=["service", "google"], default="service",
+    # settings precedence: CLI args > translate.ini > built-in defaults.
+    # The ini is the user-facing surface (autostart has no CLI).
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", default="/media/fat/overlay/translate.ini",
+                     help="settings file (KEY=VALUE); CLI args override it")
+    cargs, _ = pre.parse_known_args()
+    ini = load_ini(cargs.config)
+
+    def d(key, fallback, cast=str):
+        try:
+            return cast(ini.get(key, fallback))
+        except ValueError:
+            sys.exit("translate.ini: bad value for %s: %r" % (key, ini.get(key)))
+
+    ap = argparse.ArgumentParser(description="MiSTer AI-translation PoC daemon",
+                                 parents=[pre])
+    ap.add_argument("--backend", choices=["service", "google"],
+                    default=d("BACKEND", "service"),
                     help="service = AI-Service protocol URL (ztranslate/vgtranslate/"
                          "mock); google = direct Vision+Translate, no server")
-    ap.add_argument("--server", default="http://127.0.0.1:4404",
+    ap.add_argument("--server", default=d("SERVER", "https://ztranslate.net/service"),
                     help="AI-Service endpoint for --backend service")
-    ap.add_argument("--google-key", default="",
+    ap.add_argument("--api-key", default=d("API_KEY", ""),
+                    help="appended as api_key= to --server (service backend)")
+    ap.add_argument("--zt-mode", default=d("ZT_MODE", ""),
+                    help="ztranslate speed/quality: normal (default) or fast")
+    ap.add_argument("--google-key", default=d("GOOGLE_KEY", ""),
                     help="Google Cloud API key for --backend google")
-    ap.add_argument("--mode", choices=["text", "image"], default="image",
+    ap.add_argument("--mode", choices=["text", "image"], default=d("MODE", "image"),
                     help="default output mode for 'go' (default: image)")
-    ap.add_argument("--source", default="ja", help="source language ('' = auto)")
-    ap.add_argument("--target", default="en", help="target language")
-    ap.add_argument("--timeout", type=float, default=15.0, help="per-request timeout (s)")
-    ap.add_argument("--png-level", type=int, default=1, help="zlib level (1=fast)")
-    ap.add_argument("--osd-ms", type=int, default=8000, help="osd_msg display time")
-    ap.add_argument("--fifo", default="/tmp/translate_cmd", help="trigger fifo")
-    ap.add_argument("--min-interval", type=float, default=2.0,
+    ap.add_argument("--source", default=d("SOURCE_LANG", "ja"),
+                    help="source language ('' = service auto-detect)")
+    ap.add_argument("--target", default=d("TARGET_LANG", "en"), help="target language")
+    ap.add_argument("--timeout", type=float, default=d("TIMEOUT", 15.0, float),
+                    help="per-request timeout (s)")
+    ap.add_argument("--png-level", type=int, default=d("PNG_LEVEL", 1, int),
+                    help="zlib level (1=fast)")
+    ap.add_argument("--osd-ms", type=int, default=d("OSD_MS", 8000, int),
+                    help="osd_msg display time")
+    ap.add_argument("--fifo", default=d("FIFO", "/tmp/translate_cmd"), help="trigger fifo")
+    ap.add_argument("--min-interval", type=float, default=d("MIN_INTERVAL", 2.0, float),
                     help="minimum seconds between translations (quota guard)")
     ap.add_argument("--once", action="store_true",
                     help="single translate (using --mode) then exit; no fifo")
     args = ap.parse_args()
 
+    if args.backend == "service" and args.api_key and "api_key=" not in args.server:
+        args.server += ("&" if "?" in args.server else "?") + "api_key=" + args.api_key
+
     if args.backend == "google":
         if not args.google_key:
-            sys.exit("--backend google needs --google-key (console.cloud.google.com,"
-                     " enable Vision + Translation APIs)")
+            sys.exit("--backend google needs --google-key / GOOGLE_KEY in translate.ini"
+                     " (console.cloud.google.com, enable Vision + Translation APIs)")
         args.mode = "text"  # image mode needs server-side rendering
 
     if args.once:
@@ -405,9 +456,11 @@ def main():
 
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
     ensure_fifo(args.fifo)
-    plog("translate: daemon up pid=%d backend=%s server=%s mode=%s" %
+    plog("translate: daemon up pid=%d backend=%s server=%s mode=%s lang=%s->%s%s" %
          (os.getpid(), args.backend,
-          args.server if args.backend == "service" else "google-api", args.mode))
+          redact(args.server) if args.backend == "service" else "google-api",
+          args.mode, args.source or "auto", args.target,
+          (" zt_mode=" + args.zt_mode) if args.zt_mode else ""))
     plog("translate: trigger: echo image|text|go|hide > %s   stop: echo quit > %s (or kill %d)"
          % (args.fifo, args.fifo, os.getpid()))
 

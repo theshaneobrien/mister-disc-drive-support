@@ -1,4 +1,27 @@
-# Overlay PoC — on-the-fly translation, display milestones 0/1/2
+# Overlay PoC — on-the-fly translation for MiSTer
+
+## User setup (the whole thing, post-PoC)
+
+1. Flash the `MiSTer-disc-overlaypoc` binary from the latest release, reboot.
+2. Copy to the SD card: `translate_daemon.py`, `translate_start.sh`,
+   `translate.ini` → `/media/fat/overlay/`; `Scripts/TranslateHotkey.sh`
+   → `/media/fat/Scripts/`.
+3. Edit `/media/fat/overlay/translate.ini`: paste your ztranslate.net
+   `API_KEY`, set `SOURCE_LANG`/`TARGET_LANG` (`ZT_MODE=fast` trades
+   quality for speed), set `ENABLED=1`.
+4. One-time boot hook: `/media/fat/overlay/translate_start.sh install`
+   (appends one line to the update-safe `/media/fat/linux/user-startup.sh`).
+5. Set your hotkey from the OSD: Scripts → **TranslateHotkey** → press the
+   button (or hold one + press a second for a combo). Gyro/sticks ignored.
+6. Reboot. Load a Japanese game. Press the hotkey. Read. Press anything
+   to continue playing.
+
+Settings precedence: CLI args > `translate.ini` > defaults, so manual
+`python3 translate_daemon.py --once ...` testing still works unchanged.
+
+---
+
+## Development history — display milestones 0/1/2
 
 Spike for a RetroArch-AI-Service-style translation feature on MiSTer. This
 branch (`overlay-poc` in `Main_MiSTer/`) proves the **display half** — the

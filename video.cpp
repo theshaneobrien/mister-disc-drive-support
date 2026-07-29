@@ -2423,6 +2423,7 @@ static void fb_init()
 		}
 	}
 	spi_uio_cmd16(UIO_SET_FBUF, 0);
+	perf_log("fb: force-disable (video_init - core load)");
 }
 
 // Structure to hold DAC configuration
@@ -3613,6 +3614,9 @@ void video_fb_enable(int enable, int n)
 				input_switch(1);
 			}
 
+			// overlay PoC: every fb source switch is a suspect when the
+			// overlay "blinks away" - log who flips it and from what state
+			perf_log("fb: %s n=%d (was en=%d n=%d)", enable ? "ENABLE" : "DISABLE -> core video", n, fb_enabled, fb_num);
 			fb_enabled = enable;
 		}
 		else
@@ -3662,6 +3666,10 @@ static void video_fb_config()
 
 	brd_x = cfg.vscale_border / fb_scale_x;
 	brd_y = cfg.vscale_border / fb_scale_y;
+
+	// a video-mode set lands here; if the overlay was up it gets re-asserted
+	// with freshly computed fb dims (content drawn for the OLD dims is stale)
+	perf_log("fb: config after mode set %dx%d fb_enabled=%d", fb_width, fb_height, fb_enabled);
 
 	if (fb_enabled) video_fb_enable(1, fb_num);
 

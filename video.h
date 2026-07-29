@@ -75,6 +75,7 @@ void video_mode_cmd(char *cmd);
 // framebuffer (replaces core video until hidden), timed to /tmp/overlay_perf.log
 void video_overlay_show(const char *arg);
 void video_overlay_hide();
+void video_overlay_shot();
 
 void video_core_description(char *str, size_t len);
 void video_scaler_description(char *str, size_t len);

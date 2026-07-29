@@ -6352,6 +6352,14 @@ int input_test(int getchar)
 						// overlay_hide - switch the scaler back to core video
 						video_overlay_hide();
 					}
+					else if (!strcmp(cmd, "overlay_shot"))
+					{
+						// overlay_shot - freeze-frame: capture the current core
+						// frame and show it via the framebuffer in one step,
+						// all in RAM (no PNG/SD). The translation pipeline's
+						// display path.
+						video_overlay_shot();
+					}
 				}
 			}
 

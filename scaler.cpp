@@ -30,6 +30,7 @@ const int VEC_WIDTH = 16;
 #include "shmem.h"
 #include "file_io.h"
 #include "menu.h"
+#include "perf_log.h"
 
 #ifdef PROFILING
 #include "profiling.h"
@@ -409,6 +410,11 @@ static bool screenshot_requested = false;
 static int screenshot_rescale = 0;
 static char* screenshot_filename = NULL;
 
+// overlay PoC telemetry: request timestamp for end-to-end latency. Written
+// on the main thread before screenshot_requested is set, read by the offload
+// worker after the work is done - ordering is carried by the existing flags.
+static uint64_t screenshot_req_us = 0;
+
 bool write_screenshot(const char *filename, const uint8_t *argb,
                       int width, int height, int output_width = 0, int output_height = 0);
 
@@ -508,6 +514,7 @@ bool write_screenshot(const char *filename, const uint8_t *inbuf,
 
 static void save_screenshot(int do_rescale, int base_width, int base_height, int scaled_width, int scaled_height, unsigned char *outputbuf, char *filename) {
     bool success = false;
+    uint64_t t0 = perf_now_us();
     if (do_rescale)
     {
         printf("rescaling screenshot from %dx%d to %dx%d\n", base_width, base_height, scaled_width, scaled_height);
@@ -518,6 +525,11 @@ static void save_screenshot(int do_rescale, int base_width, int base_height, int
         printf("saving screenshot at native res %dx%d\n", base_width, base_height);
         success = write_screenshot(filename, outputbuf, base_width, base_height);
     }
+
+    // worker-thread cost (PNG encode + SD write) and request-to-file total
+    uint64_t t1 = perf_now_us();
+    perf_log("screenshot: encode+write=%lluus rescaled=%d ok=%d total=%lluus %s",
+        t1 - t0, do_rescale, success ? 1 : 0, t1 - screenshot_req_us, filename);
 
     ScreenshotResult_atomic *result_data =
     (ScreenshotResult_atomic *)malloc(sizeof(ScreenshotResult_atomic));
@@ -545,10 +557,13 @@ void do_screenshot(char* imgname)
 	screenshot_pending_atomic = true;
 	screenshot_requested = false;
 
+	uint64_t t0 = perf_now_us();
 	mister_scaler *ms = mister_scaler_init();
+	uint64_t t_init = perf_now_us();
 	if (ms == NULL)
 	{
 		printf("problem with scaler, maybe not a new enough version\n");
+		perf_log("screenshot: scaler init FAILED (%lluus)", t_init - t0);
 		Info("Scaler not compatible");
 		screenshot_pending_atomic = false;
 		free(imgname);
@@ -591,7 +606,13 @@ void do_screenshot(char* imgname)
     }
 
     mister_scaler_read(ms, screenshot_outputbuf);
+    uint64_t t_read = perf_now_us();
     FileGenerateScreenshotName(basename, filename, extension, 1024);
+
+    // capture cost on the main thread: mmap of the scaler buffer + the
+    // NEON copy out of DDR3. Everything after this line is async.
+    perf_log("screenshot: capture init=%lluus read=%lluus %dx%d -> %s",
+        t_init - t0, t_read - t_init, base_width, base_height, filename);
 
     free(imgname);
 	imgname = NULL;
@@ -634,6 +655,9 @@ void request_screenshot(char *cmd, int scaled)
     char *copy = strdup(cmd);
     if (!copy)
         return;
+
+    screenshot_req_us = perf_now_us();
+    perf_log("screenshot: requested '%s' scaled=%d", copy, scaled);
 
     screenshot_filename = copy;
     screenshot_rescale = scaled;

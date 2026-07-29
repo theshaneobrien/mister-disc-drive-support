@@ -27,6 +27,7 @@
 #include "profiling.h"
 #include "offload.h"
 #include "hdmi_cec.h"
+#include "perf_log.h"
 
 #include "support.h"
 #include "support/arcade/mra_loader.h"
@@ -4257,6 +4258,167 @@ int video_chvt(int num)
 	}
 
 	return cur_vt ? cur_vt : 1;
+}
+
+/*
+	Overlay PoC (translation feature spike): present a full-color image over
+	a running core by switching the scaler input to an HPS framebuffer bank -
+	the same mechanism the menu background and the F9 terminal use. While
+	shown this REPLACES core video: the FPGA scaler treats the HPS
+	framebuffer as an alternative source and discards its alpha channel
+	(ascal.vhd), so a true blended color HUD over live gameplay would need
+	gateware changes. Text over live video is the OSD's job (see osd_msg).
+
+	Bank 1 is used deliberately:
+	- bank 0 is /dev/fb0 (the Linux console); enabling it repoints the fbdev
+	  module params and steals controller input (input_switch(0)).
+	- bank 1/2 are the menu-background double buffer, unused while a game
+	  core runs. With n=1 video_fb_enable keeps input routed to the core.
+
+	Every stage is timed to /tmp/overlay_perf.log - the PoC exists to learn
+	where the milliseconds go on the way to the glass.
+*/
+
+static void overlay_draw_testpat(uint32_t *buf)
+{
+	// 8 color bars + white border + magenta origin square. Doubles as a
+	// pixel-format check: if the bar order below doesn't match the screen
+	// (red<->blue swapped), the ARGB/RxB assumption is wrong.
+	static const uint32_t bars[8] =
+	{
+		0xFFFFFFFF, // white
+		0xFFFFFF00, // yellow
+		0xFF00FFFF, // cyan
+		0xFF00FF00, // green
+		0xFFFF00FF, // magenta
+		0xFFFF0000, // red
+		0xFF0000FF, // blue
+		0xFF000000, // black
+	};
+
+	for (int y = 0; y < fb_height; y++)
+	{
+		uint32_t *line = buf + y * fb_width;
+		for (int x = 0; x < fb_width; x++)
+		{
+			uint32_t c = bars[(x * 8) / fb_width];
+			if (x < 2 || y < 2 || x >= fb_width - 2 || y >= fb_height - 2) c = 0xFFFFFFFF;
+			line[x] = c;
+		}
+	}
+
+	// origin marker: proves orientation and that we're at the start of the bank
+	for (int y = 2; y < 34 && y < fb_height; y++)
+		for (int x = 2; x < 34 && x < fb_width; x++)
+			buf[y * fb_width + x] = 0xFFFF00FF;
+}
+
+void video_overlay_show(const char *arg)
+{
+	uint64_t t0 = perf_now_us();
+
+	if (!fb_base || fb_width <= 0 || fb_height <= 0)
+	{
+		perf_log("overlay_show: no framebuffer (%dx%d)", fb_width, fb_height);
+		return;
+	}
+
+	if (is_menu())
+	{
+		// the menu core owns banks 1/2 for its background machinery
+		perf_log("overlay_show: refused in menu core");
+		return;
+	}
+
+	while (*arg == ' ' || *arg == '\t') arg++;
+
+	uint32_t *bank = (uint32_t*)(fb_base + (FB_SIZE * 1));
+
+	if (!*arg || !strcmp(arg, "testpat"))
+	{
+		overlay_draw_testpat(bank);
+		perf_log("overlay_show: testpat %dx%d draw=%lluus", fb_width, fb_height, perf_now_us() - t0);
+	}
+	else
+	{
+		const char *path = (*arg == '/') ? arg : getFullPath(arg);
+
+		Imlib_Load_Error error = IMLIB_LOAD_ERROR_NONE;
+		Imlib_Image img = imlib_load_image_with_error_return(path, &error);
+		uint64_t t_load = perf_now_us();
+		if (!img)
+		{
+			perf_log("overlay_show: load '%s' FAILED err=%d (%lluus)", path, error, t_load - t0);
+			return;
+		}
+
+		imlib_context_set_image(img);
+		int src_w = imlib_image_get_width();
+		int src_h = imlib_image_get_height();
+
+		Imlib_Image dst = imlib_create_image_using_data(fb_width, fb_height, bank);
+		if (!dst)
+		{
+			imlib_free_image();
+			perf_log("overlay_show: imlib wrap of fb bank failed");
+			return;
+		}
+
+		imlib_context_set_image(dst);
+		imlib_context_set_anti_alias(0); // crisp pixels for pixel art, and faster
+		imlib_context_set_blend(0);      // opaque copy, no per-pixel alpha cost
+		imlib_blend_image_onto_image(img, 0,
+			0, 0, src_w, src_h,          // whole source
+			0, 0, fb_width, fb_height);  // scaled to the whole framebuffer
+		imlib_free_image();              // frees the wrapper, not the DDR bank
+
+		imlib_context_set_image(img);
+		imlib_free_image();
+
+		uint64_t t_blit = perf_now_us();
+		perf_log("overlay_show: '%s' %dx%d -> %dx%d load=%lluus blit=%lluus",
+			path, src_w, src_h, fb_width, fb_height, t_load - t0, t_blit - t_load);
+	}
+
+	uint64_t t_en0 = perf_now_us();
+	video_fb_enable(1, 1);
+	if (!fb_enabled)
+	{
+		// video_fb_enable already printed the reason (core lacks the HPS
+		// framebuffer reader in its gateware)
+		perf_log("overlay_show: enable REFUSED (core doesn't support HPS framebuffer)");
+		return;
+	}
+	uint64_t t_en1 = perf_now_us();
+
+	// one vsync wait ~= when the first frame carrying the overlay starts
+	// scanout; the ioctl blocks the main loop for at most a frame, which is
+	// acceptable diagnostics cost in a PoC
+	uint64_t t_vs = t_en1;
+	int fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
+	if (fb >= 0)
+	{
+		int zero = 0;
+		if (ioctl(fb, FBIO_WAITFORVSYNC, &zero) != -1) t_vs = perf_now_us();
+		close(fb);
+	}
+
+	perf_log("overlay_show: enable=%lluus vsync=%lluus total=%lluus",
+		t_en1 - t_en0, t_vs - t_en1, t_vs - t0);
+}
+
+void video_overlay_hide()
+{
+	uint64_t t0 = perf_now_us();
+
+	if (!fb_enabled)
+	{
+		perf_log("overlay_hide: nothing shown");
+		return;
+	}
+
+	video_fb_enable(0);
+	perf_log("overlay_hide: %lluus", perf_now_us() - t0);
 }
 
 void video_cmd(char *cmd)

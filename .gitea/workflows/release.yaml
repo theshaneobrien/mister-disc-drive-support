@@ -1,12 +1,15 @@
-# Build BOTH MiSTer binaries and attach them to a Gitea release.
+# Build the overlay-poc binary and attach it to a Gitea release.
 #
-# A release ships two builds: MiSTer-disc (this physcd branch, stock cores)
-# and MiSTer-disc-RA (the physcd-ra branch, odelot's RA fork + physcd). Both
-# install to /media/fat/MiSTer; the download names keep them apart.
+# OVERLAY-POC BRANCH VARIANT. The physcd release workflow dual-builds the
+# physcd + physcd-ra branches; a tag on THIS branch must not do that - it
+# would attach an RA binary that lacks the overlay verbs next to one that
+# has them (the mcswap stale-asset lesson). Workflows run from the tagged
+# commit's tree, so this copy only governs tags placed on overlay-poc;
+# physcd tags keep the stock dual-build.
 #
 # Prereq: an act_runner online whose default image has git + node.
-# Trigger: push a tag like v1.0.0 (a hyphenated tag e.g. v0.2.0-beta1 is
-# marked prerelease), or run by hand from the Actions tab.
+# Trigger: push a tag like v0.5.2-overlaypoc1 (hyphenated = prerelease),
+# or run by hand from the Actions tab.
 
 name: build-release
 
@@ -21,15 +24,10 @@ jobs:
     permissions:
       contents: write        # the release attach needs repo-contents write
     steps:
-      - name: Check out the disc build (this ref, physcd)
+      - name: Check out the overlay-poc build (this ref)
         uses: actions/checkout@v4
         with:
           path: disc
-      - name: Check out the RA build (physcd-ra)
-        uses: actions/checkout@v4
-        with:
-          ref: physcd-ra
-          path: ra
 
       - name: Install the ARM toolchain and build deps
         run: |
@@ -46,17 +44,15 @@ jobs:
           $SUDO tar xf /tmp/gcc.tar.xz -C /opt/toolchain --strip-components=1
           echo "/opt/toolchain/bin" >> "$GITHUB_PATH"
 
-      - name: Build both binaries
+      - name: Build the binary
         run: |
           set -eu
           arm-none-linux-gnueabihf-gcc --version | head -1
           make -C disc -j"$(nproc)"
-          cp disc/bin/MiSTer MiSTer-disc
-          make -C ra -j"$(nproc)"
-          cp ra/bin/MiSTer MiSTer-disc-RA
-          ls -l MiSTer-disc MiSTer-disc-RA
+          cp disc/bin/MiSTer MiSTer-disc-overlaypoc
+          ls -l MiSTer-disc-overlaypoc
 
-      - name: Attach both to the Gitea release
+      - name: Attach to the Gitea release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           # prefer the auto Actions token (contents:write via permissions);
@@ -73,14 +69,11 @@ jobs:
           ID=$(printf '%s' "$REL" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2 || true)
           if [ -z "$ID" ]; then
             ID=$(curl -s -X POST -H "Authorization: token $TOKEN" -H "Content-Type: application/json" \
-              -d "{\"tag_name\":\"$TAG\",\"name\":\"physcd MiSTer $TAG\",\"prerelease\":$PRE}" "$API/releases" \
+              -d "{\"tag_name\":\"$TAG\",\"name\":\"overlay PoC $TAG\",\"prerelease\":$PRE}" "$API/releases" \
               | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2 || true)
           fi
           if [ -z "$ID" ]; then echo "Could not find/create a release for $TAG"; echo "$REL"; exit 1; fi
           curl -fsS -X POST -H "Authorization: token $TOKEN" \
-            -F "attachment=@MiSTer-disc;type=application/octet-stream" \
-            "$API/releases/$ID/assets?name=MiSTer-disc"
-          curl -fsS -X POST -H "Authorization: token $TOKEN" \
-            -F "attachment=@MiSTer-disc-RA;type=application/octet-stream" \
-            "$API/releases/$ID/assets?name=MiSTer-disc-RA"
-          echo "Attached MiSTer-disc and MiSTer-disc-RA to release $TAG."
+            -F "attachment=@MiSTer-disc-overlaypoc;type=application/octet-stream" \
+            "$API/releases/$ID/assets?name=MiSTer-disc-overlaypoc"
+          echo "Attached MiSTer-disc-overlaypoc to release $TAG."

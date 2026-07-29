@@ -8004,18 +8004,23 @@ int menu_present()
 	return (menustate != MENU_NONE1) && (menustate != MENU_NONE2);
 }
 
-void Info(const char *message, int timeout, int width, int height, int frame)
+int Info(const char *message, int timeout, int width, int height, int frame, int x, int y)
 {
 	if (menustate <= MENU_INFO)
 	{
 		OSD_PrintInfo(message, &width, &height, frame);
-		InfoEnable(20, (cfg.direct_video && get_vga_fb()) ? 30 : 10, width, height);
+		// default = the classic toast spot; callers (osd_msg) may override
+		if (x < 0) x = 20;
+		if (y < 0) y = (cfg.direct_video && get_vga_fb()) ? 30 : 10;
+		InfoEnable(x, y, width, height);
 		OsdSetSize(16);
 
 		menu_timer = GetTimer(timeout);
 		menustate = MENU_INFO;
 		OsdUpdate();
+		return 1;
 	}
+	return 0;
 }
 
 int menu_lightgun_cb(int idx, uint16_t type, uint16_t code, int value)

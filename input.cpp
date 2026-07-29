@@ -37,6 +37,7 @@
 #include "frame_timer.h"
 #include "scaler.h"
 #include "file_io.h"
+#include "perf_log.h"
 
 #define NUMDEV 30
 #define UINPUT_NAME "MiSTer virtual input"
@@ -6292,6 +6293,64 @@ int input_test(int getchar)
 						// auto-detect physical swaps; this manual command is a
 						// PSX-only fallback.
 						physcd_swap_current_core();
+					}
+					else if (!strncmp(cmd, "osd_msg", 7) &&
+						(cmd[7] == '\0' || cmd[7] == ' ' || cmd[7] == '\t'))
+					{
+						// osd_msg [-t ms] [-x n] [-y n] [-f 1|2] <text> - print
+						// text over the running core via the OSD info window,
+						// the same FPGA-composited path as Info() toasts (works
+						// on every core, game keeps running). "\n" in <text>
+						// breaks lines; -f draws a dialogue-box frame.
+						// overlay/translation PoC.
+						uint64_t t0 = perf_now_us();
+						char *p = cmd + 7;
+						int timeout = 4000, x = -1, y = -1, frame = 0;
+
+						while (1)
+						{
+							while (*p == ' ' || *p == '\t') p++;
+							if (p[0] == '-' && p[1] && strchr("txyf", p[1]) &&
+								(p[2] == ' ' || p[2] == '\t'))
+							{
+								char opt = p[1];
+								int v = strtol(p + 2, &p, 10);
+								if (opt == 't') timeout = v;
+								else if (opt == 'x') x = v;
+								else if (opt == 'y') y = v;
+								else if (opt == 'f') frame = v;
+								continue;
+							}
+							break;
+						}
+
+						// unescape literal "\n" so plain echo works multiline
+						char *s = p, *d = p;
+						while (*s)
+						{
+							if (s[0] == '\\' && s[1] == 'n') { *d++ = '\n'; s += 2; }
+							else *d++ = *s++;
+						}
+						*d = 0;
+
+						int shown = Info(p, timeout, 0, 0, frame, x, y);
+						perf_log("osd_msg: %s len=%d frame=%d pos=%d,%d timeout=%dms render+spi=%lluus",
+							shown ? "shown" : "SUPPRESSED (menu open)",
+							(int)strlen(p), frame, x, y, timeout, perf_now_us() - t0);
+					}
+					else if (!strncmp(cmd, "overlay_show", 12) &&
+						(cmd[12] == '\0' || cmd[12] == ' ' || cmd[12] == '\t'))
+					{
+						// overlay_show [testpat|<image path>] - full-color image
+						// via the HPS framebuffer. Replaces core video until
+						// overlay_hide (input keeps routing to the core). PoC
+						// for showing a translated frame.
+						video_overlay_show(cmd + 12);
+					}
+					else if (!strcmp(cmd, "overlay_hide"))
+					{
+						// overlay_hide - switch the scaler back to core video
+						video_overlay_hide();
 					}
 				}
 			}

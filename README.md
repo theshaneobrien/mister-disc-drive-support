@@ -49,38 +49,58 @@ For core requests, I've added everything I own discs for, I'm not sure about tes
 
 ## Install, three ways
 
-Pick by intention:
+Nothing here renames or replaces a stock file until method 3, and every
+method uses the release files under their exact download names.
 
-**A. Full install - the whole experience, simplest.** Replace Main outright. Insert a disc at the menu and it identifies it, loads the right core, and boots it. Games, music CDs, karaoke, Video CDs, the Play row, and the on-the-fly translation on every core - all automatic.
+**Method 1 (recommended) - the full experience, stock files untouched.**
+Menu disc detection, autoboot, the Play row, and on-the-fly translation
+on every core. One binary on the card, one ini line.
 
-1. Back up your current /media/fat/MiSTer (and /media/fat/MiSTer_RA if you use RA).
-2. From the releases page, put MiSTer-disc on your card as /media/fat/MiSTer. RA users: put MiSTer-disc-RA over BOTH /media/fat/MiSTer and /media/fat/MiSTer_RA instead.
+1. From the releases page, put MiSTer-disc on your card at /media/fat/MiSTer-disc (keep the name). Do not touch /media/fat/MiSTer.
+2. Add this line inside the `[MiSTer]` section of /media/fat/MiSTer.ini:
 
-One thing to know: an official Main update (Update All) overwrites /media/fat/MiSTer, so re-copy the binary after updates - or use C, which is this same experience without that chore.
+```
+MAIN=MiSTer-disc
+```
 
-**B. Side-by-side, scoped - stock everywhere except the sessions you choose.** Your MiSTer stays bone stock; only consoles launched from the _Disc_Cores folder run the disc binary. You pick the console, the disc mounts itself. No autoboot, no disc detection at the menu, and translation only exists inside those disc sessions - by design: nothing alternate ever runs unless you explicitly launched it.
+Every session (menu and all cores) now runs the disc binary. Official
+updates keep updating the stock file harmlessly (it is no longer what
+runs); delete the line and you are bone stock again; if the binary goes
+missing, MiSTer quietly falls back to stock. RA users: put MiSTer-disc-RA
+on the card too (again, keep the name) and route your RA launchers at it:
 
-1. From the releases page, put MiSTer-disc on your card as /media/fat/MiSTer_Disc. Do not touch /media/fat/MiSTer.
+```
+[RA_*]
+main=MiSTer-disc-RA
+```
+
+(Per-core sections win over the global line, so RA sessions get the RA
+build and everything else gets the disc build. An existing MiSTer_RA
+setup keeps working unchanged if you'd rather leave it be.)
+
+**Method 2 - scoped: stock everywhere except the sessions you choose.**
+Only consoles launched from the _Disc_Cores folder run the disc binary.
+You pick the console, the disc mounts itself. No autoboot, no menu disc
+detection, and translation only exists inside those disc sessions - by
+design: nothing alternate ever runs unless you explicitly launched it.
+
+1. Put MiSTer-disc on your card at /media/fat/MiSTer-disc. Do not touch /media/fat/MiSTer.
 2. Unzip Disc-Cores-MGLs.zip from the release to /media/fat (it adds a _Disc_Cores folder).
 3. Add this to /media/fat/MiSTer.ini:
 
 ```
 [CD-*]
-main=MiSTer_Disc
+main=MiSTer-disc
 ```
 
-4. Launch a console from _Disc_Cores with your disc in the drive, it mounts on its own. RA users: also put MiSTer-disc-RA at /media/fat/MiSTer_RA (back up the original) and your existing hand-picked RA launchers become disc-capable too.
+4. Launch a console from _Disc_Cores with your disc in the drive, it mounts on its own. RA users: same [RA_*] section as method 1.
 
-**C. Side-by-side, global - the full experience with stock Main untouched.** Everything A gives you (menu disc detection, autoboot, translation on any core), but /media/fat/MiSTer is never modified: one ini line routes every session to the disc binary instead.
-
-1. From the releases page, put MiSTer-disc on your card as /media/fat/MiSTer_Disc. Do not touch /media/fat/MiSTer.
-2. Add this under the `[MiSTer]` section of /media/fat/MiSTer.ini:
-
-```
-MAIN=MiSTer_Disc
-```
-
-Official updates keep updating the stock file harmlessly (it is no longer what runs); delete the line and you are bone stock again. If the binary goes missing, MiSTer quietly falls back to stock.
+**Method 3 - replace Main wholesale (you know what you're doing).**
+The original full install: back up /media/fat/MiSTer, copy MiSTer-disc
+over it (RA users: MiSTer-disc-RA over /media/fat/MiSTer and
+/media/fat/MiSTer_RA). Same experience as method 1; the difference is
+an official Main update overwrites your copy, so you re-copy after
+updates. Method 1 exists so you never have to.
 
 All ways: set each CD core's Region to Auto where it has one (see Region), and BIOS files are exactly the ones ripped games use, so if your CD cores already run rips you are done. For the RetroAchievements setup itself use MiSTer Companion or odelot's instructions.
 

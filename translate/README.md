@@ -102,9 +102,11 @@ Everything logs to **`/tmp/overlay_perf.log`** (`tail -f` it):
 - First line after boot = which Main build is flashed (compile stamp).
 - `hotkey: fired but no daemon` → daemon not running (`ENABLED=1`? then
   `translate_start.sh` or reboot).
-- `HTTP 500` from the backend → check `SOURCE_LANG` is set (`ja`) and
-  `ZT_MODE` is blank; sending `mode=normal` and/or auto-detect produced
-  consistent 500s on hardware.
+- `HTTP 500` from the backend → a server-side error, usually transient
+  (one hardware outbreak resolved on its own; every `ZT_MODE` /
+  `SOURCE_LANG` permutation later tested clean). Wait and retry; to
+  prove the MiSTer side is healthy, point `--server` at the mock
+  server for one round.
 - `capture FAILED ... not updating` → overlay still shown or no core
   running.
 - Hotkey does nothing in the menus/terminal — by design; it only fires

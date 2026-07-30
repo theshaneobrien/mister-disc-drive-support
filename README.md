@@ -57,7 +57,7 @@ For core requests, I've added everything I own discs for, I'm not sure about tes
 **B. Side-by-side - your MiSTer stays stock.** You pick the console from a folder, the disc mounts itself. No autoboot and no disc detection at the menu: in this mode, you are the disc detector.
 
 1. From the releases page, put MiSTer-disc on your card as /media/fat/MiSTer_Disc. Do not touch /media/fat/MiSTer.
-2. Unzip Disc-Cores-MGLs.zip from the release to /media/fat (it adds a _Disc Cores folder).
+2. Unzip Disc-Cores-MGLs.zip from the release to /media/fat (it adds a _Disc_Cores folder).
 3. Add this to /media/fat/MiSTer.ini:
 
 ```
@@ -65,7 +65,7 @@ For core requests, I've added everything I own discs for, I'm not sure about tes
 main=MiSTer_Disc
 ```
 
-4. Launch a console from _Disc Cores with your disc in the drive, it mounts on its own. RA users: also put MiSTer-disc-RA at /media/fat/MiSTer_RA (back up the original) and your existing hand-picked RA launchers become disc-capable too.
+4. Launch a console from _Disc_Cores with your disc in the drive, it mounts on its own. RA users: also put MiSTer-disc-RA at /media/fat/MiSTer_RA (back up the original) and your existing hand-picked RA launchers become disc-capable too.
 
 Both ways: set each CD core's Region to Auto where it has one (see Region), and BIOS files are exactly the ones ripped games use, so if your CD cores already run rips you are done. For the RetroAchievements setup itself use MiSTer Companion or odelot's instructions.
 

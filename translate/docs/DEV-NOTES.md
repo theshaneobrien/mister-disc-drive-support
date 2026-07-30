@@ -251,10 +251,15 @@ Behavior, by design:
    backend for OCR box coordinates; ztranslate returns finished
    images (no boxes), and an own server (11) renders server-side
    anyway — client-side rendering solves a problem we no longer have
-8. side-by-side install via MGL launchers instead of replacing
-   /media/fat/MiSTer — the physcd sidecar already proved the mechanism
-   (`main=` ini routing + alternate binary name + `routed_main()`
-   basename detection); the overlay binary could ship the same way
+8. ~~side-by-side install via MGL launchers~~ **SOLVED BY STOCK
+   2026-07-30, zero code**: `MAIN=` is an ordinary ini var and the
+   global `[MiSTer]` section always matches, so `MAIN=MiSTer_Disc`
+   there routes EVERY session (menu + all cores) via the re-exec in
+   `user_io_init` (user_io.cpp:1461) — which self-no-ops when already
+   the right exec and fail-safes when the binary is missing. The MGL
+   approach was per-core; translate wants all cores, and the global
+   line covers both features at once. Documented in README install
+   Option B; the `[CD-*]`-only tier remains for disc-only users
 9. ~~google backend A/B~~ **CUT 2026-07-30**: ztranslate is the
    de-facto backend (Shane); the google code path + ini keys were
    removed from the daemon the same day — one protocol, one path

@@ -67,6 +67,8 @@ main=MiSTer_Disc
 
 4. Launch a console from _Disc_Cores with your disc in the drive, it mounts on its own. RA users: also put MiSTer-disc-RA at /media/fat/MiSTer_RA (back up the original) and your existing hand-picked RA launchers become disc-capable too.
 
+Want the full experience everywhere (menu features, and the on-the-fly translation on any core) while still keeping stock Main untouched? Use a global route instead of the [CD-*] section: put `MAIN=MiSTer_Disc` under `[MiSTer]` in MiSTer.ini. Every session then runs the disc binary; delete the line to go back to bone stock.
+
 Both ways: set each CD core's Region to Auto where it has one (see Region), and BIOS files are exactly the ones ripped games use, so if your CD cores already run rips you are done. For the RetroAchievements setup itself use MiSTer Companion or odelot's instructions.
 
 ## Region

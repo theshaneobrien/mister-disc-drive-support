@@ -26,7 +26,22 @@ RetroArch AI-Service protocol to [ztranslate.net](https://ztranslate.net).
 | `mister/translate.ini` | `/media/fat/translate/` |
 | `Scripts/SetTranslateHotkey.sh` | `/media/fat/Scripts/` (`chmod +x`) |
 
-1. Flash the release binary to `/media/fat/MiSTer`, reboot.
+1. Install the release binary — two ways:
+   - **Replace** (simplest): flash it to `/media/fat/MiSTer`, reboot.
+   - **Side-by-side** (keep stock Main; Update-All-safe): put it at
+     `/media/fat/MiSTer_Disc` and add one line under the `[MiSTer]`
+     section of `MiSTer.ini`:
+
+     ```
+     MAIN=MiSTer_Disc
+     ```
+
+     Every session (menu and all cores) then re-execs into the
+     side-by-side binary; `/media/fat/MiSTer` stays bone stock and
+     keeps getting official updates harmlessly. Delete the line to
+     revert. If the binary is missing, MiSTer silently stays stock
+     (fail-safe). First line of `/tmp/overlay_perf.log` confirms the
+     routing (the stock binary writes no stamp).
 2. Copy the files as above.
 3. Edit `/media/fat/translate/translate.ini`: paste your `API_KEY`,
    set `ENABLED=1`.

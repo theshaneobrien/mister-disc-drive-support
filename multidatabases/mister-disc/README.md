@@ -13,7 +13,7 @@ disc swapping (multi-disc RPGs, Monster Rancher, Vib Ribbon with any album),
 per-disc memory cards and regional BIOS on PlayStation, disc integrity
 telemetry, and RetroAchievements earned from the physical disc on the RA
 build. And since v0.7.0: **on-the-fly translation** - press a button in a
-Japanese game and the dialogue comes back in English, drawn inside the game's
+game and the dialogue comes back in English, drawn inside the game's
 own text boxes, on any core. ARM-side Main binary only: the FPGA cores stay
 completely stock, nothing is forked or patched, and the official cores must
 already be installed. The generator follows the latest upstream GitHub

@@ -26,11 +26,13 @@ RetroArch AI-Service protocol to [ztranslate.net](https://ztranslate.net).
 | `mister/translate.ini` | `/media/fat/translate/` |
 | `Scripts/SetTranslateHotkey.sh` | `/media/fat/Scripts/` (`chmod +x`) |
 
-1. Install the release binary — two ways:
-   - **Replace** (simplest): flash it to `/media/fat/MiSTer`, reboot.
-   - **Side-by-side** (keep stock Main; Update-All-safe): put it at
-     `/media/fat/MiSTer_Disc` and add one line under the `[MiSTer]`
-     section of `MiSTer.ini`:
+1. Install the release binary — for translation you want it running on
+   EVERY core, which means install A or C from the disc project README:
+   - **A. Replace** (simplest): flash it to `/media/fat/MiSTer`, reboot.
+     Re-copy after official Main updates.
+   - **C. Side-by-side, global** (stock Main untouched, update-safe):
+     put it at `/media/fat/MiSTer_Disc` and add one line under the
+     `[MiSTer]` section of `MiSTer.ini`:
 
      ```
      MAIN=MiSTer_Disc
@@ -42,6 +44,10 @@ RetroArch AI-Service protocol to [ztranslate.net](https://ztranslate.net).
      revert. If the binary is missing, MiSTer silently stays stock
      (fail-safe). First line of `/tmp/overlay_perf.log` confirms the
      routing (the stock binary writes no stamp).
+   - (The disc project's scoped install B — `[CD-*]` + `_Disc_Cores`
+     MGLs — runs the binary only in disc sessions, so translation would
+     only exist on the CD cores. Fine if that's what you want; not the
+     translate-everywhere experience.)
 2. Copy the files as above.
 3. Edit `/media/fat/translate/translate.ini`: paste your `API_KEY`,
    set `ENABLED=1`.

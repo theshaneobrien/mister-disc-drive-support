@@ -47,14 +47,18 @@ For core requests, I've added everything I own discs for, I'm not sure about tes
   * LG BP50NB40 CD/DVD/BD (Tested by indigo)
 * A decent power supply for the drive. This one matters. A CD drive pulls a big gulp of current spinning up for a seek, and the DE10-nano's USB or a cheap hub will sag under it, drop the drive off the bus, and take your controllers with it for a minute. Use a powered hub, ideally give the drive its own supply. A game that freezes for a minute then carries on by itself is power, not the software.
 
-## Install, two ways
+## Install, three ways
 
-**A. Full install - the whole experience.** Insert a disc at the menu and it identifies it, loads the right core, and boots it. Games, music CDs, karaoke, Video CDs, the Play row, all automatic.
+Pick by intention:
+
+**A. Full install - the whole experience, simplest.** Replace Main outright. Insert a disc at the menu and it identifies it, loads the right core, and boots it. Games, music CDs, karaoke, Video CDs, the Play row, and the on-the-fly translation on every core - all automatic.
 
 1. Back up your current /media/fat/MiSTer (and /media/fat/MiSTer_RA if you use RA).
 2. From the releases page, put MiSTer-disc on your card as /media/fat/MiSTer. RA users: put MiSTer-disc-RA over BOTH /media/fat/MiSTer and /media/fat/MiSTer_RA instead.
 
-**B. Side-by-side - your MiSTer stays stock.** You pick the console from a folder, the disc mounts itself. No autoboot and no disc detection at the menu: in this mode, you are the disc detector.
+One thing to know: an official Main update (Update All) overwrites /media/fat/MiSTer, so re-copy the binary after updates - or use C, which is this same experience without that chore.
+
+**B. Side-by-side, scoped - stock everywhere except the sessions you choose.** Your MiSTer stays bone stock; only consoles launched from the _Disc_Cores folder run the disc binary. You pick the console, the disc mounts itself. No autoboot, no disc detection at the menu, and translation only exists inside those disc sessions - by design: nothing alternate ever runs unless you explicitly launched it.
 
 1. From the releases page, put MiSTer-disc on your card as /media/fat/MiSTer_Disc. Do not touch /media/fat/MiSTer.
 2. Unzip Disc-Cores-MGLs.zip from the release to /media/fat (it adds a _Disc_Cores folder).
@@ -67,9 +71,18 @@ main=MiSTer_Disc
 
 4. Launch a console from _Disc_Cores with your disc in the drive, it mounts on its own. RA users: also put MiSTer-disc-RA at /media/fat/MiSTer_RA (back up the original) and your existing hand-picked RA launchers become disc-capable too.
 
-Want the full experience everywhere (menu features, and the on-the-fly translation on any core) while still keeping stock Main untouched? Use a global route instead of the [CD-*] section: put `MAIN=MiSTer_Disc` under `[MiSTer]` in MiSTer.ini. Every session then runs the disc binary; delete the line to go back to bone stock.
+**C. Side-by-side, global - the full experience with stock Main untouched.** Everything A gives you (menu disc detection, autoboot, translation on any core), but /media/fat/MiSTer is never modified: one ini line routes every session to the disc binary instead.
 
-Both ways: set each CD core's Region to Auto where it has one (see Region), and BIOS files are exactly the ones ripped games use, so if your CD cores already run rips you are done. For the RetroAchievements setup itself use MiSTer Companion or odelot's instructions.
+1. From the releases page, put MiSTer-disc on your card as /media/fat/MiSTer_Disc. Do not touch /media/fat/MiSTer.
+2. Add this under the `[MiSTer]` section of /media/fat/MiSTer.ini:
+
+```
+MAIN=MiSTer_Disc
+```
+
+Official updates keep updating the stock file harmlessly (it is no longer what runs); delete the line and you are bone stock again. If the binary goes missing, MiSTer quietly falls back to stock.
+
+All ways: set each CD core's Region to Auto where it has one (see Region), and BIOS files are exactly the ones ripped games use, so if your CD cores already run rips you are done. For the RetroAchievements setup itself use MiSTer Companion or odelot's instructions.
 
 ## Region
 

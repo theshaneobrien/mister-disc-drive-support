@@ -56,6 +56,12 @@ MIN_INTERVAL=2.0
 
 # how long OSD text stays up (text mode), ms
 OSD_MS=8000
+
+# what to call the running game in the server's logs. Left blank, the
+# daemon reads it from MiSTer itself: the core name, plus the disc serial
+# or the loaded filename. Set log_file_entry=1 under [MiSTer] in
+# MiSTer.ini to get real disc serials (e.g. PSX__SLES-01370).
+LABEL=
 INI_EOF
     echo "created $INI - add your ztranslate API key and set ENABLED=1"
 fi

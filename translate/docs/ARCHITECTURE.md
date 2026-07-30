@@ -44,8 +44,9 @@ never needs a reflash:
   OCR sees sane glyph shapes.
 - **PNG encode**: minimal stdlib writer (zlib level 1).
 - **Backend**: the RetroArch AI-Service protocol, one URL swap between
-  the hosted ztranslate.net (de-facto), a LAN vgtranslate/mock, or an
-  eventual self-hosted server (milestone 11). A direct-Google backend
+  the hosted ztranslate.net (de-facto), a LAN vgtranslate/mock, or the
+  self-hosted retroglot server (milestone 11 - functional, S0-S4 done,
+  packaging pending; lives in its own repo). A direct-Google backend
   existed briefly and was cut 2026-07-30 — one protocol, one path.
 - **Reply routing**: image → unique `/tmp/translated_N.png` (unique
   *path* per round — see imlib rule) → `overlay_show`; text → wrapped

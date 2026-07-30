@@ -267,7 +267,9 @@ Behavior, by design:
     (shipped with physcd v0.6.0) is the template — the downloader
     natively distributes file trees shaped like our install zip, and
     the binary ships as a side-by-side alternate main
-11. **self-hosted, shareable ztranslate-compatible server**: a docker
+11. **IN PROGRESS as `retroglot` (own repo)** — S0–S4 done, packaging
+    (S5) and publishing (S6) pending; stack pivoted to RapidOCR +
+    CTranslate2. Original sketch follows: a docker
     image anyone can run (unraid/Pi/VPS) speaking the AI-Service
     protocol — OCR (manga-ocr, game/manga-tuned) + local MT (Sugoi V4
     or NLLB-int8) + PIL in-place rendering. mock_server.py is the

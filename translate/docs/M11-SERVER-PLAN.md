@@ -1,5 +1,26 @@
 # M11 — self-hosted translation server: work order
 
+> **STATUS (2026-07-30): this plan happened — as `retroglot`, in its own
+> repo (`~/dev/retroglot`, gitea `shane/retroglot`). S0–S4 are DONE; S5
+> (packaging) and S6 (share) remain. The maintained truth is retroglot's
+> `docs/ROADMAP.md`, README and `config.py` — the tables and config block
+> below are the ORIGINAL plan and several choices changed in the building:**
+>
+> - **PaddleOCR was dropped** (no Python 3.14 wheels) for **RapidOCR**
+>   (same PP-OCR models on onnxruntime); comic-text-detector was demoted,
+>   never integrated; **meikiocr** (trained on rendered game text) was
+>   added and benchmarked — better on kana-only Game Boy frames, slightly
+>   worse on dense Saturn dialogue.
+> - **The server ships with `PROFILE=echo`** — a wiring test that returns
+>   every frame unchanged. Set `PROFILE=light` (or `quality`) and, for
+>   the CT2 backends, `MT_MODEL_PATH`, or you get silent untranslated
+>   freeze-frames and wonder why. This is the one thing a fresh install
+>   trips over.
+> - `CACHE_ENTRIES` is the **text** translation memory; the frame cache
+>   is `CACHE_FRAMES`/`CACHE_DISTANCE` and is perceptual (dHash), not
+>   identical-hash. No font is bundled; host fonts are discovered.
+> - Configuration is env-vars only; no config.yml exists.
+
 A shareable docker image anyone can run (unraid / Pi / mini-PC / VPS)
 that speaks the RetroArch AI-Service protocol: OCR + translation + in-place
 rendering, no cloud account, nothing leaves the LAN. Drop-in for
@@ -128,13 +149,12 @@ S0 can be validated on hardware the same evening it is written.
 
 ## Open decisions for Shane
 
-1. **Framework**: FastAPI+uvicorn recommended (async, typed, tiny);
-   stdlib-only would match the daemon's philosophy but fights us on
-   concurrency and model lifecycle. Veto if you want zero-dependency.
+1. **Framework**: RESOLVED — FastAPI+uvicorn, as recommended.
 2. **Default profile**: `quality` assumes the unraid box gives it ~4GB.
 3. **Sugoi licensing/redistribution**: if the weights can't ship in an
    image, first-run download is the fallback (task in S5).
-4. **Where the code lives**: `server/` in this repo now, graduate to its
-   own repo when shared? And its eventual name.
+4. **Where the code lives**: RESOLVED — its own repo from the start,
+   named **retroglot** (AGPL-3.0 + attribution, commercial licences
+   reserved).
 5. **GPU**: CPU-first everywhere; CUDA path is config-gated bonus work,
    not on the critical path.

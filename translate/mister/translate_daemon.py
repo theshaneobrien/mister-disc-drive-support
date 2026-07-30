@@ -282,10 +282,20 @@ def backend_service(args, mode, png):
         osd_show(args, "AI: " + reply["error"])
         return "error"
     if mode == "image" and reply.get("image"):
+        decoded = base64.b64decode(reply["image"])
+        if decoded == png:
+            # retroglot hands back the EXACT bytes it was sent when nothing
+            # was read (the echo/inplace renderers return the original
+            # frame data untouched). Freezing the screen on an unchanged
+            # image looks like a missed button press, so surface it as the
+            # "no text" toast instead. ztranslate re-encodes its reply, so
+            # its bytes never match and behaviour there is unchanged.
+            mister("osd_msg -t 3000 AI: no text found")
+            return "notext-echo"
         _shot_seq[0] += 1
         path = TRANSLATED_PNG_FMT % _shot_seq[0]
         with open(path, "wb") as f:
-            f.write(base64.b64decode(reply["image"]))
+            f.write(decoded)
         mister("overlay_show " + path)
         _overlay_shown[0] = True
         if _shot_seq[0] > 1:
@@ -428,7 +438,8 @@ def main():
     ap.add_argument("--mode", choices=["text", "image"], default=d("MODE", "image"),
                     help="default output mode for 'go' (default: image)")
     ap.add_argument("--source", default=d("SOURCE_LANG", "ja"),
-                    help="source language ('' = service auto-detect)")
+                    help="source language ('' = ztranslate auto-detect; "
+                         "retroglot uses its DEFAULT_SOURCE instead)")
     ap.add_argument("--target", default=d("TARGET_LANG", "en"), help="target language")
     ap.add_argument("--timeout", type=float, default=d("TIMEOUT", 15.0, float),
                     help="per-request timeout (s)")

@@ -71,6 +71,61 @@ def mister(cmd):
         f.write(cmd + "\n")
 
 
+def _read(path, limit=512):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read(limit).strip()
+    except OSError:
+        return ""
+
+
+def _mtime(path):
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return 0.0
+
+
+def game_label(override=""):
+    """What is running, for the server's per-game telemetry.
+
+    The AI-Service protocol carries a 'label' with every frame -
+    RetroArch fills it with <system>__<game> - so a translation server can
+    report timings per game instead of one big average. MiSTer publishes
+    everything needed already, no extra support required:
+
+        /tmp/CORENAME     the running core
+        /tmp/GAMEID       CRC32 and, for discs, the real serial (needs
+                          log_file_entry=1 in MiSTer.ini)
+        /tmp/CURRENTPATH  the last file picked in the menu
+
+    A disc serial like SLES-01370 is the best identifier there is, so it
+    wins when it is the fresher of the two - which also stops a serial
+    from an earlier CD session labelling a cartridge game loaded later.
+    """
+    if override:
+        return override
+
+    system = _read("/tmp/CORENAME").splitlines()[0] if _read("/tmp/CORENAME") else "MiSTer"
+
+    serial = crc = ""
+    for line in _read("/tmp/GAMEID").splitlines():
+        if line.startswith("Serial:"):
+            serial = line.split(":", 1)[1].strip()
+        elif line.startswith("CRC32:"):
+            crc = line.split(":", 1)[1].strip()
+
+    picked = _read("/tmp/CURRENTPATH").splitlines()
+    picked = os.path.splitext(os.path.basename(picked[0]))[0] if picked else ""
+
+    if serial and _mtime("/tmp/GAMEID") >= _mtime("/tmp/CURRENTPATH"):
+        game = serial
+    else:
+        game = picked or serial or (("crc" + crc) if crc else "")
+
+    return "%s__%s" % (system, game) if game else system
+
+
 def capture(stale_timeout=0.35):
     """Read the current frame from the scaler DDR3 buffer.
 
@@ -209,7 +264,7 @@ def backend_service(args, mode, png):
     """RetroArch-AI-Service protocol (ztranslate / vgtranslate / mock)."""
     body = {
         "image": base64.b64encode(png).decode(),
-        "label": "MiSTer__overlay_poc",
+        "label": game_label(args.label),
         "state": {"paused": 0},
     }
     q = {"output": "image,png" if mode == "image" else "text"}
@@ -379,6 +434,9 @@ def main():
                     help="per-request timeout (s)")
     ap.add_argument("--png-level", type=int, default=d("PNG_LEVEL", 1, int),
                     help="zlib level (1=fast)")
+    ap.add_argument("--label", default=d("LABEL", ""),
+                    help="override the game label sent with each frame "
+                         "(default: read the running core and game from /tmp)")
     ap.add_argument("--osd-ms", type=int, default=d("OSD_MS", 8000, int),
                     help="osd_msg display time")
     ap.add_argument("--fifo", default=d("FIFO", "/tmp/translate_cmd"), help="trigger fifo")
@@ -397,6 +455,7 @@ def main():
 
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
     ensure_fifo(args.fifo)
+    plog("translate: label=%s" % game_label(args.label))
     plog("translate: daemon up pid=%d server=%s mode=%s lang=%s->%s%s" %
          (os.getpid(), redact(args.server), args.mode,
           args.source or "auto", args.target,

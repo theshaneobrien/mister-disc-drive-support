@@ -92,8 +92,25 @@ echo quit   > /tmp/translate_cmd
 | `MODE` | `image` | `image` freeze-frame / `text` OSD toast |
 | `MIN_INTERVAL` | `2.0` | min seconds between translations (quota guard) |
 | `OSD_MS` | `8000` | text-mode display time |
+| `LABEL` | auto | what to call the game in server logs; blank means read it from MiSTer |
 
 CLI args override the ini (`python3 translate_daemon.py --help`).
+
+## Telling the server what you are playing
+
+Every frame is sent with a label, which a self-hosted server can use to
+report timings and translation quality per game rather than in one
+average. The daemon works it out from what MiSTer already publishes: the
+core name from `/tmp/CORENAME`, plus a disc serial or the loaded
+filename, giving labels like `PSX__SLES-01370` or `SNES__Fire Emblem`.
+
+Disc serials and CRC32s need one line under `[MiSTer]` in `MiSTer.ini`:
+
+```
+log_file_entry=1
+```
+
+Set `LABEL=` in `translate.ini` to override it with a fixed string.
 
 ## Troubleshooting
 

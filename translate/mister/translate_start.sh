@@ -17,6 +17,49 @@ INI=$DIR/translate.ini
 US=/media/fat/linux/user-startup.sh
 FIFO=/tmp/translate_cmd
 
+# no settings file yet: write the documented template so there is always
+# a file to edit. Never touched again once it exists - it is user-owned
+# (holds the API key), which is also why the MultiDatabases install ships
+# code only and leaves this file to us.
+if [ ! -f "$INI" ]; then
+    mkdir -p "$DIR"
+    cat > "$INI" <<'INI_EOF'
+# MiSTer on-the-fly translation - settings
+# Read by translate_daemon.py at startup (CLI args override these) and by
+# translate_start.sh at boot. Edit, then restart the daemon (or reboot).
+
+# master switch for the boot autostart (translate_start.sh checks this;
+# manual daemon runs ignore it)
+ENABLED=0
+
+# --- service ----------------------------------------------------------
+# ztranslate.net: make an account, paste your key here. The daemon appends
+# it to SERVER as api_key=... automatically.
+API_KEY=
+SERVER=https://ztranslate.net/service
+
+# ztranslate speed/quality: blank = service default (normal), or fast
+# for quicker/lower quality.
+ZT_MODE=
+
+# --- languages ----------------------------------------------------------
+SOURCE_LANG=ja
+TARGET_LANG=en
+
+# --- behavior -----------------------------------------------------------
+# image = freeze-frame with translation rendered in place (recommended)
+# text  = OSD toast over the running game
+MODE=image
+
+# minimum seconds between translations (protects your API quota)
+MIN_INTERVAL=2.0
+
+# how long OSD text stays up (text mode), ms
+OSD_MS=8000
+INI_EOF
+    echo "created $INI - add your ztranslate API key and set ENABLED=1"
+fi
+
 daemon_pids() {
     for d in /proc/[0-9]*; do
         grep -qs "translate_daemon\.py" "$d/cmdline" 2>/dev/null && echo "${d##*/}"

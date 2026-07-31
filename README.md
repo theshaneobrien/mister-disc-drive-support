@@ -45,6 +45,7 @@ For core requests, I've added everything I own discs for, I'm not sure about tes
 * Tested by others
   * SuperDock (Tested by Long-Marsupial3422)
   * LG BP50NB40 CD/DVD/BD (Tested by indigo)
+  * Rioddas BT638
 * A decent power supply for the drive. This one matters. A CD drive pulls a big gulp of current spinning up for a seek, and the DE10-nano's USB or a cheap hub will sag under it, drop the drive off the bus, and take your controllers with it for a minute. Use a powered hub, ideally give the drive its own supply. A game that freezes for a minute then carries on by itself is power, not the software.
 
 ## Install, three ways
@@ -179,9 +180,16 @@ PHYSCD_ACOUSTIC=0     ; 1 = a spare disc in the drive spins and seeks along with
 PHYSCD_AUDIO_CORE=PSX ; which console's CD player an audio disc boots: PSX, MegaCD, Saturn, NeoGeo, or TurboGrafx16
 PHYSCD_VCD_CORE=CDI   ; which core a Video CD boots: CDI plays them, others are there to experiment with
 PHYSCD_CDG_CORE=MegaCD ; which core a CD+G karaoke disc boots: MegaCD or TurboGrafx16 draw the graphics
+PHYSCD_LOG=1          ; 1 writes physcd_log.txt next to the binary (default), 0 off. See Something not working
 ```
 
 They also work under [MiSTer], but keeping them in their own section means any other MiSTer binary on your card (like MiSTer Companion's MiSTer_RA) skips them quietly instead of popping unknown option warnings at boot.
+
+## Something not working?
+
+There is a log file, **physcd_log.txt**, sitting next to the binary you copied (usually /media/fat). Grab it off the card and attach it to an issue, that one file is almost always enough to tell what happened. It is on by default, survives reboots, caps itself so it can never fill the card, and contains nothing personal: which build you are running, your physcd settings, your drive, what disc was recognised, its track layout, and the read counters for the session. Set PHYSCD_LOG=0 in the [physcd] section if you would rather it did not exist.
+
+Worth knowing for one common report: if RetroAchievements does not recognise a disc, the log says whether the disc actually read cleanly while the hash was being computed. An unreadable sector gets handed to the hasher as blank data (so games never hang), which quietly changes the hash, so a dirty or marginal disc can look exactly like an unsupported game. If the log flags read errors during the hash, clean the disc and try again before assuming there is no achievement set for it.
 
 ## Acoustic seek / Disc Mirroring
 

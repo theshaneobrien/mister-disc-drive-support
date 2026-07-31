@@ -22,6 +22,7 @@
 #include "fpga_system_manager.h"
 #include "fpga_reset_manager.h"
 #include "fpga_nic301.h"
+#include "support/physcd/physcd_log.h"
 
 #define FPGA_REG_BASE 0xFF000000
 #define FPGA_REG_SIZE 0x01000000
@@ -619,6 +620,13 @@ char *getappname()
 
 void app_restart(const char *path, const char *xml, const char *exe)
 {
+	/* the ONLY reliable end-of-session hook. exiting a core to the menu
+	   comes through here and then fork()s + _exit(0)s the parent, so no
+	   atexit runs and physcd_close() is never called on that path - if the
+	   session counters are not written here they are never written at all.
+	   before the sync() below, so they reach the card with everything else. */
+	physcd_log_counters();
+
 	sync();
 	fpga_core_reset(1);
 

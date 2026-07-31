@@ -28,6 +28,7 @@
 #include "mister_physcd.h"
 #include "physcd_autoboot.h"
 #include "physcd_acoustic.h"
+#include "physcd_log.h"
 
 #ifdef HAS_RCHEEVOS
 // v2 (RA build): identify a physical disc for RetroAchievements and prefer
@@ -213,7 +214,32 @@ int physcd_mount_current_core(void)
 	// no image file. harmless if RA is off or the core is stock -
 	// achievements_load_game no-ops without an active handler. 3DO has no RA
 	// core, so it simply finds no handler.
-	if (mounted > 0) achievements_load_game(PHYSCD_SENTINEL, 0);
+	if (mounted > 0)
+	{
+		/* wrap the hash read so a "RA didn't recognise my disc" report is
+		   self-diagnosing. the hasher reads the boot executable through our
+		   cdreader, and an unreadable sector is served to it as ZEROS with a
+		   success return (read_sector_impl) - so a bad read silently changes
+		   the hash and rcheevos cannot tell. these two counter snapshots are
+		   the only way to see that: a nonzero delta means the hash was
+		   computed over data the drive never actually delivered, which is a
+		   disc/drive problem, NOT "your backup is not authentic". */
+		uint32_t bad0 = 0, edc0 = 0;
+		physcd_integrity_snapshot(&bad0, &edc0);
+		physcd_log("ra: hashing the mounted disc (core %s)", user_io_get_core_name());
+
+		achievements_load_game(PHYSCD_SENTINEL, 0);
+
+		uint32_t bad1 = 0, edc1 = 0;
+		physcd_integrity_snapshot(&bad1, &edc1);
+		if (bad1 != bad0 || edc1 != edc0)
+			physcd_log("ra: READ ERRORS DURING HASH - %u zero-filled sector(s), %u edc failure(s). "
+				"the hash is over corrupt data; reseat/clean the disc and retry before "
+				"concluding the game is unsupported",
+				bad1 - bad0, edc1 - edc0);
+		else
+			physcd_log("ra: disc read clean during hash (no zero-fills, no edc failures)");
+	}
 #endif
 
 	return mounted;

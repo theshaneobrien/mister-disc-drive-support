@@ -27,6 +27,7 @@
 
 #include "mister_physcd.h"
 #include "physcd_acoustic.h"
+#include "physcd_log.h"
 
 // ---------------------------------------------------------------- state
 
@@ -215,12 +216,21 @@ static struct {
 	uint32_t st_subless_served;   /* audio-window hits served to a sub-wanting
 	                                 consumer with has_sub=0: packs actually lost */
 	uint32_t st_keepalive;        /* idle keepalive pokes fired this mount */
+	/* MOUNT-cumulative mirrors of the four interval counters that
+	   stats_report() zeroes every 5s. the /tmp snapshot wants a live
+	   window; the support log wants the whole session, and by the time
+	   anyone reads the log the interval ones are always ~0. */
+	uint32_t st_hit_total;
+	uint32_t st_miss_total;
+	double   st_worst_ms_mount;
+	double   st_worst_io_ms_mount;
 } pcd = { -1, 0, -1, -1, {}, 0, NULL, {0,0}, {0,0}, 0, 0, 0,
 	  PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
 	  0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, 0,
 	  0, 0, 0, 0, -1,
 	  0, 0, 0, 0, 0, 0.0, 0.0, 0,
-	  0, 0, 0, 0 };
+	  0, 0, 0, 0,
+	  0, 0, 0.0, 0.0 };
 
 /* "a swap happened during this mount" must survive the core-exit exec (the
    menu runs in a FRESH process - fpga_load_rbf execs; see physcd_autoboot.h,
@@ -683,6 +693,7 @@ static int fill_cache(int lba, int count, int sync)
 		   and the cooked fallback. */
 		double dt = now_ms() - io0;
 		if (dt > pcd.st_worst_io_ms) pcd.st_worst_io_ms = dt;
+		if (dt > pcd.st_worst_io_ms_mount) pcd.st_worst_io_ms_mount = dt;
 		return -1;
 	}
 
@@ -743,11 +754,13 @@ static int fill_cache(int lba, int count, int sync)
 		}
 		double d = now_ms() - io0;
 		if (d > pcd.st_worst_io_ms) pcd.st_worst_io_ms = d;
+		if (d > pcd.st_worst_io_ms_mount) pcd.st_worst_io_ms_mount = d;
 		return 0;
 	}
 
 	double d = now_ms() - io0;
 	if (d > pcd.st_worst_io_ms) pcd.st_worst_io_ms = d;
+	if (d > pcd.st_worst_io_ms_mount) pcd.st_worst_io_ms_mount = d;
 
 	pcd.consec_fail = 0;          /* a clean burst: the drive is there */
 
@@ -835,6 +848,41 @@ static void stats_report()
 	pcd.st_worst_io_ms = 0.0;
 	/* st_bad is cumulative for the mount - a running total is what
 	   you want when hunting an intermittent read problem */
+}
+
+/* integrity counters for the ra hash wrap: the caller snapshots before and
+   after, and a delta means the hash was fed sectors the drive never really
+   delivered (zero-filled or edc-failed). stats-only, no lock - same accepted
+   telemetry race as everything else in this struct. */
+void physcd_integrity_snapshot(uint32_t *bad, uint32_t *edc_bad)
+{
+	if (bad) *bad = pcd.st_bad;
+	if (edc_bad) *edc_bad = pcd.st_edc_bad;
+}
+
+/* the same numbers stats_report() puts in /tmp, but the MOUNT-cumulative
+   view and into the support log. lives here because the counters are
+   file-static; called only at session boundaries (core exit, after an ra
+   hash), never on a timer - a support log is a story, not a sampler. */
+void physcd_log_counters(void)
+{
+	if (!physcd_log_level() || pcd.fd < 0) return;
+
+	uint32_t reads = pcd.st_hit_total + pcd.st_miss_total;
+	char blk[1024];
+	snprintf(blk, sizeof(blk),
+		"counters: reads %u  hitrate %.1f%%  worst miss %.0f ms  worst drive io %.0f ms\n"
+		"           BAD %u zero-filled  EDC bad %u / %u checked  malformed %u  last bad lba %d\n"
+		"           stalls %u (data %u audio %u)  >250ms %u  >1s %u  worst %.0f ms  audio over-cap %u\n"
+		"           subok %s  ladder-lost %u  subless-served %u  reattach %u  device %s\n",
+		reads, reads ? 100.0 * pcd.st_hit_total / reads : 0.0,
+		pcd.st_worst_ms_mount, pcd.st_worst_io_ms_mount,
+		pcd.st_bad, pcd.st_edc_bad, pcd.st_edc_checked, pcd.st_form_bad, pcd.st_edc_last_lba,
+		pcd.st_sync_data + pcd.st_sync_audio, pcd.st_sync_data, pcd.st_sync_audio,
+		pcd.st_sync_250, pcd.st_sync_1000, pcd.st_sync_worst_ms, pcd.st_aud_overcap,
+		pcd.sub_ok == 1 ? "yes" : pcd.sub_ok == 0 ? "no" : "unknown",
+		pcd.st_sub_lost, pcd.st_subless_served, pcd.st_reattach, cur_dev);
+	physcd_log_block(blk);
 }
 
 static int open_drive(char *out, int outsz);   /* defined below */
@@ -961,6 +1009,13 @@ static void *prefetch_thread(void *arg)
 						pcd.ev_initial = (was_present < 0) ? 1 : 0;
 						pcd.ev = (int)PHYSCD_EV_DISC_IN;
 						printf("physcd: disc detected: %s%s%s%s%s\n",
+							physcd_disc_name(t),
+							*physcd_region_name(r) ? " region " : "",
+							physcd_region_name(r),
+							lbl[0] ? " - " : "", lbl);
+						/* the single most useful support line: what the fork thinks is
+						   in the drive. prefetch thread, blocking is free here. */
+						physcd_log("disc: %s%s%s%s%s",
 							physcd_disc_name(t),
 							*physcd_region_name(r) ? " region " : "",
 							physcd_region_name(r),
@@ -1264,6 +1319,7 @@ int physcd_open(const char *dev)
 	pthread_setaffinity_np(pcd.thread, sizeof(set), &set);
 
 	printf("\x1b[32mphyscd: opened %s\n\x1b[0m", cur_dev);
+	physcd_log("drive: opened %s", cur_dev);
 	return 0;
 }
 
@@ -1429,6 +1485,8 @@ int physcd_load_toc(toc_t *toc)
 	pcd.st_edc_checked = pcd.st_edc_bad = pcd.st_form_bad = pcd.st_edc_logged = 0;
 	pcd.st_edc_last_lba = -1;
 	pcd.st_worst_ms = pcd.st_worst_io_ms = 0.0;
+	pcd.st_hit_total = pcd.st_miss_total = 0;
+	pcd.st_worst_ms_mount = pcd.st_worst_io_ms_mount = 0.0;
 	pcd.st_sync_data = pcd.st_sync_audio = 0;
 	pcd.st_sync_50 = pcd.st_sync_250 = pcd.st_sync_1000 = 0;
 	pcd.st_sync_worst_ms = pcd.st_sync_total_ms = 0.0;
@@ -1477,6 +1535,26 @@ int physcd_load_toc(toc_t *toc)
 	printf("\x1b[32mphyscd: toc loaded, %d tracks, leadout %d, subchannel %s\n\x1b[0m",
 		n, pcd.leadout,
 		pcd.sub_ok == 1 ? "yes" : pcd.sub_ok == 0 ? "no" : "unknown");
+
+	/* ONE write, not one per track: this runs with pcd.io held (the swap
+	   reload at the top of the prefetch loop) and, on a psx manual swap, on
+	   the main loop thread - a per-line fsync run here would stall the
+	   running game while pcd.swapping serves it zeros. */
+	if (physcd_log_level())
+	{
+		char blk[1024];
+		int p = snprintf(blk, sizeof(blk),
+			"toc: %d tracks, leadout %d, subchannel %s, first data lba %d\n",
+			n, pcd.leadout,
+			pcd.sub_ok == 1 ? "yes" : pcd.sub_ok == 0 ? "no" : "unknown",
+			pcd.first_data_lba);
+		for (int i = 0; i < pcd.ntrk && i < 12 && p > 0 && p < (int)sizeof(blk); i++)
+			p += snprintf(blk + p, sizeof(blk) - p,
+				"           track %2d: %-5s start %7d end %7d\n",
+				i + 1, pcd.trk[i].audio ? "audio" : "data",
+				pcd.trk[i].start, pcd.trk[i].end);
+		physcd_log_block(blk);
+	}
 	return 0;
 }
 
@@ -1623,6 +1701,7 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 		/* advance this stream's prefetch, leave the other alone */
 		if (lba >= pcd.cursor[w]) pcd.cursor[w] = lba + 1;
 		pcd.st_hit++;
+		pcd.st_hit_total++;
 		return 0;
 	}
 
@@ -1642,8 +1721,10 @@ static int read_sector_impl(int lba, uint8_t *dst, uint8_t *sub96, int *sub_vali
 	pcd.sync_pending--;
 
 	pcd.st_miss++;
+	pcd.st_miss_total++;
 	double d = now_ms() - t0;
 	if (d > pcd.st_worst_ms) pcd.st_worst_ms = d;
+	if (d > pcd.st_worst_ms_mount) pcd.st_worst_ms_mount = d;
 
 	/* sync-stall telemetry: characterize the inline fill that just froze
 	   this thread. w is the track type (win_of, above); d is already

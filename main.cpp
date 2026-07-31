@@ -37,6 +37,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "osd.h"
 #include "offload.h"
 #include "support/physcd/physcd_autoboot.h"
+#include "support/physcd/physcd_log.h"
 #include "perf_log.h"
 
 const char *version = "$VER:" VDATE;
@@ -109,6 +110,11 @@ int main(int argc, char *argv[])
 
 	FindStorage();
 	user_io_init((argc > 1) ? argv[1] : "",(argc > 2) ? argv[2] : NULL);
+
+	// support log: after cfg_parse (inside user_io_init) so it can echo the
+	// settings in effect, and before anything physcd does so the header is
+	// the first thing in the file.
+	physcd_log_startup();
 
 	// phase B of disc autoboot: if the menu process loaded us because a
 	// disc was inserted, it left a marker. nothing to do otherwise, so a

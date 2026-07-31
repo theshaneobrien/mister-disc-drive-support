@@ -75,6 +75,7 @@ static const ini_var_t ini_vars[] =
 	{ "PHYSCD_AUDIO_CORE", (void*)(cfg.physcd_audio_core), STRING, 0, sizeof(cfg.physcd_audio_core) - 1 },
 	{ "PHYSCD_VCD_CORE", (void*)(cfg.physcd_vcd_core), STRING, 0, sizeof(cfg.physcd_vcd_core) - 1 },
 	{ "PHYSCD_CDG_CORE", (void*)(cfg.physcd_cdg_core), STRING, 0, sizeof(cfg.physcd_cdg_core) - 1 },
+	{ "PHYSCD_LOG", (void*)(&(cfg.physcd_log)), UINT8, 0, 3 },
 	{ "FONT", (void*)(&(cfg.font)), STRING, 0, sizeof(cfg.font) - 1 },
 	{ "FB_SIZE", (void*)(&(cfg.fb_size)), UINT8, 0, 4 },
 	{ "FB_TERMINAL", (void*)(&(cfg.fb_terminal)), UINT8, 0, 1 },
@@ -629,6 +630,7 @@ void cfg_parse()
 	strcpy(cfg.physcd_audio_core, "PSX");	// audio cd -> PSX bios cd player by default
 	strcpy(cfg.physcd_vcd_core, "CDI");	// video cd -> CD-i core by default (it plays them)
 	strcpy(cfg.physcd_cdg_core, "MegaCD");	// cd+g -> MegaCD by default (MegaCD + TurboGrafx16 draw the graphics on released cores)
+	cfg.physcd_log = 1;		// on: a support log nobody can produce after the fact is worthless
 	cfg.video_brightness = 50;
 	cfg.video_contrast = 50;
 	cfg.video_saturation = 100;

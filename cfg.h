@@ -44,6 +44,7 @@ typedef struct {
 	char physcd_audio_core[16];	// which core an audio cd boots into for its bios cd player (default PSX)
 	char physcd_vcd_core[16];	// which core a Video CD (CD-Bridge) disc boots into (default CD-i, which plays them)
 	char physcd_cdg_core[16];	// which core a CD+G karaoke disc boots into (default MegaCD; MegaCD + TurboGrafx16 draw the graphics)
+	uint8_t physcd_log;		// support log to physcd_log.txt on the card: 0 off, 1 on (2-3 reserved)
 	int16_t bootcore_timeout;
 	uint8_t fb_size;
 	uint8_t fb_terminal;

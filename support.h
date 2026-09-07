@@ -3,6 +3,7 @@
 #include "support/minimig/minimig_boot.h"
 #include "support/minimig/minimig_fdd.h"
 #include "support/minimig/minimig_share.h"
+#include "support/minimig/minimig_a2065.h"
 
 // SharpMz support
 #include "support/sharpmz/sharpmz.h"
@@ -11,6 +12,9 @@
 #include "support/a2/dsk2nib_lib.h"
 // Apple IIgs disk integration
 #include "support/a2/iigs_disk.h"
+
+// Mac
+#include "support/mac/mac.h"
 
 // Archie support
 #include "support/archie/archie.h"

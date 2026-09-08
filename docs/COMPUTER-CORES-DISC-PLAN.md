@@ -117,13 +117,17 @@ mount. Work items beyond the foundation:
    (`physcd_autoboot.cpp:131-170`) is a hardcoded if/else over the six console
    cores; Minimig is not in it. Needs the CD32 *config* selected, not just the
    core loaded.
-3. **The NVRAM save trap — the same bug we just fixed in cdi.cpp.**
+3. **The NVRAM save path** (reassessed 2026-09-08, milder than first written).
    `akiko_cd32_set_cd_path()` (`akiko_cd32.cpp:1292`) derives a per-game NVRAM
-   save path from the CD path via `compute_save_path()`, and `open()`s the path
-   for `posix_fadvise`. A sentinel path produces a junk save name. Guard it the
-   way `cdi_mount_cd()` guards the per-game save dance with `PHYSCD_SENTINEL`,
-   and keep a single shared NVRAM for physical discs. **This is the third time
-   this pattern has appeared — check for it on every new core.**
+   save from the CD path via `compute_save_path()`, which hashes only the
+   **basename**. The sentinel is a fixed string, so it hashes to a stable
+   `cd32-<hash>.nvr` — every physical disc shares one NVRAM, which is exactly
+   the behaviour we want. So this is not the cdi.cpp bug repeating: it degrades
+   gracefully rather than corrupting. Two things still worth doing when CD32 is
+   wired: make the shared-NVRAM choice explicit rather than accidental, and skip
+   the `open()` + `posix_fadvise` that `set_cd_path` performs on what is not a
+   file (it fails harmlessly today, guarded by the `fd >= 0` check).
+   Still check every new core for the per-game-save-from-path pattern.
 
 ### CDTV — nearly free after CD32
 

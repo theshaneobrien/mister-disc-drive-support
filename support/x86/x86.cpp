@@ -39,6 +39,7 @@
 #include "../../shmem.h"
 #include "../../ide.h"
 #include "../physcd/mister_physcd.h"
+#include "../physcd/physcd_log.h"
 #include "x86_share.h"
 
 #define FDD0_BASE   0xF200
@@ -789,11 +790,24 @@ int x86_mount_phys_cd(void)
 {
 	for (int num = 4; num <= 5; num++)
 	{
-		if (!ide_is_placeholder(num - 2)) continue;
+		if (!ide_is_placeholder(num - 2))
+		{
+			/* not a swappable slot: either the core has no cd on this
+			   channel, or a non-cd image is already mounted there. */
+			physcd_log("ao486: ide slot %d is not swappable, skipping", num - 2);
+			continue;
+		}
 
 		memset(config.img_name[num], 0, sizeof(config.img_name[0]));
 		strcpy(config.img_name[num], PHYSCD_SENTINEL);
-		if (hdd_set(num - 2, (char*)PHYSCD_SENTINEL)) return 1;
+		physcd_log("ao486: offering the disc to ide slot %d", num - 2);
+		if (hdd_set(num - 2, (char*)PHYSCD_SENTINEL))
+		{
+			physcd_log("ao486: mounted on ide slot %d - the guest needs "
+			           "its own cd driver (OAKCDROM.SYS + MSCDEX) to see it",
+			           num - 2);
+			return 1;
+		}
 
 		/* slot took the sentinel but no disc came up - do not leave the
 		   sentinel parked in the config, or the next core load retries a
@@ -802,6 +816,8 @@ int x86_mount_phys_cd(void)
 	}
 
 	printf("physcd: no swappable ao486 cd slot took the disc\n");
+	physcd_log("ao486: no swappable cd slot took the disc - check the core has "
+	           "a cd-rom enabled on the secondary ide channel");
 	return 0;
 }
 

@@ -5,6 +5,7 @@
 #include "../../ide.h"
 #include "../../cd.h"
 #include "mister_physcd.h"
+#include "physcd_log.h"
 #include "physcd_ide.h"
 
 /* ---- toc_t -> drive_t/track_t ----------------------------------------
@@ -30,6 +31,7 @@ int physcd_ide_attach(drive_t *drv)
 
 	if (physcd_open(NULL))
 	{
+		physcd_log("ide: no drive opened - nothing to mount");
 		physcd_close();
 		return 0;
 	}
@@ -37,6 +39,8 @@ int physcd_ide_attach(drive_t *drv)
 	toc_t toc = {};
 	if (physcd_load_toc(&toc) || !toc.last)
 	{
+		physcd_log("ide: drive opened but no readable toc - disc missing, "
+		           "unfinalized, or still spinning up");
 		physcd_close();
 		return 0;
 	}
@@ -49,6 +53,7 @@ int physcd_ide_attach(drive_t *drv)
 	if (n > max)
 	{
 		printf("physcd-ide: disc has %d tracks, only %d fit - truncating\n", n, max);
+		physcd_log("ide: disc has %d tracks, only %d fit - truncating", n, max);
 		n = max;
 	}
 
@@ -113,10 +118,13 @@ int physcd_ide_attach(drive_t *drv)
 
 	printf("physcd-ide: %d track(s) + lead-out, data track %d, mode2 = %d, lead-out lba %u\n",
 	       drv->track_cnt - 1, drv->data_num, dt->mode2, lead_out->start);
+	physcd_log("ide: toc adapted - %d track(s) + lead-out, data track %d, mode2 %d, lead-out lba %u",
+	           drv->track_cnt - 1, drv->data_num, dt->mode2, lead_out->start);
 
 	/* spin a cold drive up before the guest's first read: dos/mscdex and the
 	   atapi layer enforce a not-ready timeout the console cores never had. */
 	physcd_prewarm_blocking();
+	physcd_log("ide: mounted, drive prewarmed");
 	return 1;
 }
 
@@ -132,5 +140,6 @@ void physcd_ide_detach(drive_t *drv)
 	drv->track_cnt = 0;
 	drv->data_num = 0;
 
+	physcd_log("ide: physical mount released");
 	physcd_close();
 }

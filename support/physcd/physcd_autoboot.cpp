@@ -211,6 +211,11 @@ int physcd_mount_current_core(void)
 	if (!recognised)
 	{
 		printf("physcd: core '%s' has no physical disc support yet\n", user_io_get_core_name());
+		/* the commonest "i typed mount_phys and nothing happened" report:
+		   stdout is /dev/null unless DEBUG= is set, so without this line
+		   the refusal is completely invisible. */
+		physcd_log("mount: core '%s' has no physical disc support in this build",
+		           user_io_get_core_name());
 		return 0;
 	}
 

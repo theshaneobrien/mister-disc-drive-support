@@ -25,6 +25,7 @@
 #include "../3do/3do.h"
 #include "../pcecd/pcecd.h"
 #include "../cdi/cdi.h"
+#include "../x86/x86.h"
 #include "mister_physcd.h"
 #include "physcd_autoboot.h"
 #include "physcd_acoustic.h"
@@ -200,6 +201,11 @@ int physcd_mount_current_core(void)
 	else if (is_pce()) { pcecd_set_image(0, PHYSCD_SENTINEL); mounted = pcecdd.loaded; }
 	// cd-i CD is disk slot 0; cdi_mount_cd now returns whether it mounted
 	else if (is_cdi()) mounted = cdi_mount_cd(0, PHYSCD_SENTINEL);
+	// ao486 is the first NON-console target: a live drive the guest OS
+	// sees, not something we autoboot into. physcd_identify returns
+	// PHYSCD_DISC_UNKNOWN for a dos/data disc so autoboot still refuses
+	// it - this branch only serves the explicit mount_phys request.
+	else if (is_x86()) mounted = x86_mount_phys_cd();
 	else recognised = 0;
 
 	if (!recognised)

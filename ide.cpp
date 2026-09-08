@@ -22,6 +22,7 @@
 #include "hardware.h"
 #include "ide.h"
 #include "ide_cdrom.h"
+#include "support/physcd/mister_physcd.h"
 
 #if 0
 	#define dbg_printf     printf
@@ -100,7 +101,14 @@ int ide_img_mount(fileTYPE *f, const char *name, int rw)
 	if (len)
 	{
 		const char *ext = name + len - 4;
-		if (!strncasecmp(".chd", ext, 4))
+		if (!strcmp(name, PHYSCD_SENTINEL))
+		{
+			/* physcd: the drive IS the medium, there is no file to open.
+			   mirrors the .chd case below, which also reports present
+			   without opening anything. */
+			ret = 1;
+		}
+		else if (!strncasecmp(".chd", ext, 4))
 		{
 			ret = 1;
 		}

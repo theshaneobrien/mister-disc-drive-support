@@ -20,6 +20,8 @@
 #include "hardware.h"
 #include "cd.h"
 #include "ide.h"
+#include "support/physcd/mister_physcd.h"
+#include "support/physcd/physcd_ide.h"
 
 #if 0
 #define dbg_printf     printf
@@ -1051,7 +1053,7 @@ void cdrom_read(ide_config *ide)
 
 	track_t *track = get_track_from_lba(drive, ide->regs.pkt_lba, is_index0);
 
-	if (ide->state == IDE_STATE_INIT_RW && !drive->chd_f && track)
+	if (ide->state == IDE_STATE_INIT_RW && !drive->chd_f && !drive->phys && track)
 	{
 		uint32_t pos = track->skip + (ide->regs.pkt_lba - track->start) * track->sectorSize;
 		ide->null = (FileSeek(&track->f, pos, SEEK_SET) < 0);
@@ -1090,6 +1092,30 @@ void cdrom_read(ide_config *ide)
 		}
 
 	}
+	else if (drive->phys)
+	{
+		/* physcd: cooked 2048 straight off the disc. physcd_read_data2048
+		   reads each sector's mode byte itself, so mode1-vs-mode2 needs no
+		   branch here. pkt_lba does not advance across a partial read, so
+		   carry our own cursor exactly as the chd path does. */
+		if (ide->state == IDE_STATE_INIT_RW) drive->phys_lba = ide->regs.pkt_lba;
+
+		uint32_t d_offset = 0;
+		for (uint32_t i = 0; i < cnt; i++)
+		{
+			if (physcd_read_data2048(drive->phys_lba, ide_buf + d_offset))
+			{
+				ide->null = 1;
+				memset(ide_buf + d_offset, 0, 2048);
+			}
+			else
+			{
+				ide->null = 0;
+			}
+			d_offset += 2048;
+			drive->phys_lba++;
+		}
+	}
 	else
 	{
 		read_cd_sectors(ide, track, cnt);
@@ -1109,6 +1135,10 @@ int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
 	bool is_index0 = false;
 	track_t *track = get_track_from_lba(drive, lba, is_index0);
 	if (!track) return -1;
+
+	/* physcd: raw 2352 off the disc. the track lookup above still runs, so
+	   an lba past the lead-out is rejected the same way it is for an image. */
+	if (drive->phys) return physcd_read_sector(lba, buf, NULL) ? -1 : 0;
 
 	if (drive->chd_f)
 	{
@@ -1202,6 +1232,20 @@ int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
 bool cdrom_read_track_raw(track_t *track, uint32_t lba, uint8_t *buf, int buflen)
 {
 	if (!track || !buf) return false;
+
+	/* physcd: callers own the byte order (cdtv byteswaps cdda, akiko and
+	   the atapi path do not), so hand back the drive's bytes untouched and
+	   add no swap of our own. */
+	if (track->phys)
+	{
+		if (buflen <= 0 || buflen > PHYSCD_RAW) return false;
+		if (buflen == PHYSCD_RAW) return physcd_read_sector(lba, buf, NULL) == 0;
+		uint8_t raw[PHYSCD_RAW];
+		if (physcd_read_sector(lba, raw, NULL)) return false;
+		memcpy(buf, raw, buflen);
+		return true;
+	}
+
 	if (!track->f.opened()) return false;
 
 	uint32_t pos = track->skip + (lba - track->start) * track->sectorSize;
@@ -1809,6 +1853,7 @@ const char* cdrom_parse(uint32_t num, const char *filename)
 
 	//always close files and reset state. empty filename == unmounted cd from OSD
 	cdrom_close_chd(&ide_inst[num].drive[drv]);
+	physcd_ide_detach(&ide_inst[num].drive[drv]);
 	for (uint8_t i = 0; i < sizeof(ide_inst[num].drive[drv].track) / sizeof(track_t); i++)
 	{
 		if (ide_inst[num].drive[drv].track[i].f.opened())
@@ -1822,7 +1867,17 @@ const char* cdrom_parse(uint32_t num, const char *filename)
 	ide_inst[num].drive[drv].play_start_lba = 0;
 	ide_inst[num].drive[drv].play_end_lba = 0;
 	const char *path = NULL;
-	if (strlen(filename))
+	/* physcd: the sentinel names the drive, not a file. it must branch
+	   before getFullPath(), which would turn it into a bogus path and send
+	   every loader below into a doomed open(). note we deliberately do NOT
+	   add phys to the same_path short-circuit above: the sentinel string is
+	   identical for every disc, so re-selecting it has to re-read the toc or
+	   a swapped disc would keep the old one's track table. */
+	if (filename && !strcmp(filename, PHYSCD_SENTINEL))
+	{
+		res = physcd_ide_attach(&ide_inst[num].drive[drv]) ? filename : 0;
+	}
+	else if (strlen(filename))
 	{
 		path = getFullPath(filename);
 		res = load_chd_file(&ide_inst[num].drive[drv], path);
@@ -1862,6 +1917,7 @@ const char* cd_drive_parse(drive_t *drv, int slot, const char *filename)
 
 	//always close files and reset state. empty filename == unmounted cd from OSD
 	cdrom_close_chd(drv);
+	physcd_ide_detach(drv);
 	for (uint8_t i = 0; i < sizeof(drv->track) / sizeof(track_t); i++)
 	{
 		if (drv->track[i].f.opened())
@@ -1875,7 +1931,17 @@ const char* cd_drive_parse(drive_t *drv, int slot, const char *filename)
 	drv->play_start_lba = 0;
 	drv->play_end_lba = 0;
 	const char *path = NULL;
-	if (strlen(filename))
+	/* physcd: the sentinel names the drive, not a file. it must branch
+	   before getFullPath(), which would turn it into a bogus path and send
+	   every loader below into a doomed open(). note we deliberately do NOT
+	   add phys to the same_path short-circuit above: the sentinel string is
+	   identical for every disc, so re-selecting it has to re-read the toc or
+	   a swapped disc would keep the old one's track table. */
+	if (filename && !strcmp(filename, PHYSCD_SENTINEL))
+	{
+		res = physcd_ide_attach(drv) ? filename : 0;
+	}
+	else if (strlen(filename))
 	{
 		path = getFullPath(filename);
 		res = load_chd_file(drv, path);

@@ -67,6 +67,7 @@ struct track_t
 	uint8_t  mode2;
 	uint8_t  number;
 	int      chd_offset;
+	uint8_t  phys;		// physcd: sectors come from the usb drive, f/chd_f unused
 };
 
 struct drive_t
@@ -88,6 +89,7 @@ struct drive_t
 	uint8_t  placeholder;
 	uint8_t  allow_placeholder;
 	uint8_t  cd;
+	uint8_t  phys;		// physcd: a physical usb cd-rom backs this drive
 	uint8_t  load_state;
 	uint8_t  last_load_state;
 	uint8_t  track_cnt;
@@ -110,6 +112,7 @@ struct drive_t
 	uint8_t	 *chd_hunkbuf;
 	uint32_t  chd_total_size;
 	uint32_t  chd_last_partial_lba;
+	uint32_t  phys_lba;	// physcd: same role as chd_last_partial_lba - pkt_lba does not advance across a partial read
 
 	uint16_t id[256];
 };

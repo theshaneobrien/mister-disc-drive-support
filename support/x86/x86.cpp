@@ -38,6 +38,7 @@
 #include "../../fpga_io.h"
 #include "../../shmem.h"
 #include "../../ide.h"
+#include "../physcd/mister_physcd.h"
 #include "x86_share.h"
 
 #define FDD0_BASE   0xF200
@@ -472,7 +473,7 @@ static void fdd_set(int num, char* filename)
 	IOWR(FDD0_BASE + subaddr, 0xC, 0);
 }
 
-static void hdd_set(int num, char* filename)
+static int hdd_set(int num, char* filename)
 {
 	int present = 0;
 	int cd = 0;
@@ -521,6 +522,8 @@ static void hdd_set(int num, char* filename)
 	{
 		ide_img_set(num, present ? &ide_image[num] : 0, cd);
 	}
+
+	return present && cd;
 }
 
 static uint8_t bin2bcd(unsigned val)
@@ -774,6 +777,32 @@ void x86_poll(int only_ide)
 		sd_req >>= 3;
 		if (!only_ide && (sd_req & 3)) fdd_io(sd_req & 1);
 	}
+}
+
+/* physcd: mount the physical drive as the guest's cd-rom. ao486 is a
+   live-drive target, not an autoboot one - you boot the machine yourself
+   and this makes the disc appear on the secondary ide channel, which is
+   the cd-capable one (hdd_set only reaches cdrom_parse for num > 1, i.e.
+   x86_set_image slots 4 and 5). the guest still needs its own driver
+   (OAKCDROM.SYS + MSCDEX) to see it, exactly as with a chd. */
+int x86_mount_phys_cd(void)
+{
+	for (int num = 4; num <= 5; num++)
+	{
+		if (!ide_is_placeholder(num - 2)) continue;
+
+		memset(config.img_name[num], 0, sizeof(config.img_name[0]));
+		strcpy(config.img_name[num], PHYSCD_SENTINEL);
+		if (hdd_set(num - 2, (char*)PHYSCD_SENTINEL)) return 1;
+
+		/* slot took the sentinel but no disc came up - do not leave the
+		   sentinel parked in the config, or the next core load retries a
+		   mount the user never asked for. */
+		memset(config.img_name[num], 0, sizeof(config.img_name[0]));
+	}
+
+	printf("physcd: no swappable ao486 cd slot took the disc\n");
+	return 0;
 }
 
 void x86_set_image(int num, char *filename)

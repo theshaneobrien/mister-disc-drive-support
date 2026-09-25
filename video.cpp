@@ -3355,12 +3355,23 @@ static void spd_config_update()
 
 #define fr_constrain(fr) ((cfg.refresh_min && fr < cfg.refresh_min) ? cfg.refresh_min : (cfg.refresh_max && fr > cfg.refresh_max) ? cfg.refresh_max : fr)
 
+// set by the translation overlay on a real framebuffer on/off transition.
+// that transition changes the FB parameters the scaler reports, which
+// get_video_info turns into a "video changed" - see video_mode_adjust.
+static bool overlay_fb_toggled = false;
+
 void video_mode_adjust(bool force)
 {
 	static bool rep_force = false;
 	if (force) rep_force = true;
 
 	VideoInfo video_info;
+
+	// the core's own geometry as it stood before this poll. an overlay
+	// toggle moves only the FB parameters, never these.
+	const uint32_t prev_vtime = current_video_info.vtime;
+	const uint32_t prev_width = current_video_info.width;
+	const uint32_t prev_height = current_video_info.height;
 
 	const bool vid_changed = get_video_info(rep_force, &video_info);
 	current_video_info = video_info;
@@ -3378,7 +3389,24 @@ void video_mode_adjust(bool force)
 	if(menu != menu_now && cfg.spd_quirk < 2) spd_config_update();
 	menu = menu_now;
 
-	if (vid_changed && !is_menu())
+	// the translation overlay switching the scaler to/from the HPS
+	// framebuffer is reported as a video change, but the core's timing and
+	// size are untouched - there is nothing to re-fit, and re-fitting does
+	// harm. vsync_adjust rebuilds the identical mode; vscale_mode 4/5 would
+	// size the output to the OVERLAY (video_resolution_adjust reads
+	// fb_width/height as the core size while fb_en). either way the mode
+	// set's video_fb_config + Linux fb module reconfig blacked out the top
+	// of the overlay a frame later ("fb: config after mode set" 24ms after
+	// overlay_show, vsync_adjust=1, 320x240 15 kHz scaler mode). the
+	// geometry check keeps a stale flag from ever eating a real change.
+	const bool overlay_toggle = vid_changed && overlay_fb_toggled
+		&& video_info.vtime == prev_vtime
+		&& video_info.width == prev_width
+		&& video_info.height == prev_height;
+	if (vid_changed) overlay_fb_toggled = false;
+	if (overlay_toggle) perf_log("fb: overlay toggle, core video unchanged - mode re-set skipped");
+
+	if (vid_changed && !overlay_toggle && !is_menu())
 	{
 		if (cfg_has_video_sections())
 		{
@@ -4307,12 +4335,14 @@ static int overlay_present(Imlib_Image src, int src_w, int src_h, const char *ta
 	free(shadow);
 	uint64_t t_copy = perf_now_us();
 
+	const bool was_enabled = fb_enabled;
 	video_fb_enable(1, 1);
 	if (!fb_enabled)
 	{
 		perf_log("%s: enable REFUSED (core doesn't support HPS framebuffer)", tag);
 		return 0;
 	}
+	if (!was_enabled) overlay_fb_toggled = true;
 	uint64_t t_en = perf_now_us();
 
 	// one vsync wait ~= when the first frame carrying the overlay starts
@@ -4408,6 +4438,7 @@ void video_overlay_hide()
 	}
 
 	video_fb_enable(0);
+	overlay_fb_toggled = true;
 	perf_log("overlay_hide: %lluus", perf_now_us() - t0);
 }
 

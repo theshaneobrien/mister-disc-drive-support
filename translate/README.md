@@ -79,6 +79,47 @@ echo quit   > /tmp/translate_cmd
 /media/fat/translate/translate_start.sh stop
 ```
 
+## On a CRT (analog RGB)
+
+The translated screen is drawn by MiSTer's scaler, and a normal CRT setup
+(`vga_scaler=0`) sends the analog output around the scaler entirely - so the
+translation runs, gets logged, and never reaches the tube. The fix is to put
+the scaler on the analog output and give it a 15 kHz mode a TV can show. In
+MiSTer.ini:
+
+```ini
+[MiSTer]
+vga_mode=rgb
+composite_sync=1
+vga_scaler=1
+video_mode=320,15,30,35,240,4,4,14,6293
+vscale_mode=1
+```
+
+Reboot after editing - MiSTer only reads the ini when a core loads.
+
+- That mode is standard 240p: 15.73 kHz, 262 lines, 60 Hz. It is 320 wide
+  on purpose: the scaler assumes square pixels, so a 640-wide 240-line mode
+  comes out squashed into half the screen.
+- `vscale_mode=1` keeps the game's lines 1:1 on the tube (a 224-line game
+  gets thin borders instead of being stretched).
+- The trade: the analog picture now goes through the scaler instead of being
+  the core's native output, and HDMI will not display this mode (the pixel
+  clock is below the HDMI minimum).
+- Just one core? Put those lines under its own section (`[SNES]`, `[3DO]`...)
+  instead of `[MiSTer]`, and the menu and everything else keep their native
+  output.
+- It is 60 Hz, which suits Japanese games. PAL 50 Hz games need a different
+  mode.
+- `vsync_adjust=1` is fine from v0.8.0. Older builds blanked the top of the
+  translated screen a moment after it appeared - use `vsync_adjust=0` there.
+
+Would rather keep your native picture? Leave `vga_scaler=0` and set
+`MODE=text` in translate.ini: the translation appears as text in the OSD box
+instead (English only - the OSD font is ASCII). That is also the only route
+on S-Video and composite, which are built from the core's raw output and can
+never carry the translated screen (text mode is untested there so far).
+
 ## Settings (`/media/fat/translate/translate.ini`)
 
 | Key | Default | Meaning |
@@ -135,6 +176,9 @@ Everything logs to **`/tmp/overlay_perf.log`** (`tail -f` it):
   scaler can't alpha-blend the framebuffer over live video); the game
   keeps running underneath.
 - OSD text mode is ASCII only (8×8 hardware font) — fine for English out.
+- On analog RGB the translated screen needs the scaler on the analog
+  output — see [On a CRT](#on-a-crt-analog-rgb). S-Video and composite
+  can only use `MODE=text`.
 - The hotkey press also reaches the game — pick buttons your game ignores.
 - Ornate/stylized fonts (brush-style title screens) may defeat the OCR;
   regular dialogue boxes work well.

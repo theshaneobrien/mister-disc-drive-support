@@ -20,6 +20,7 @@ This is a fork of Main_MiSTer, the ARM/Linux side of MiSTer. All the work is in 
 * RetroAchievements earned straight off the physical disc, on the RA build (Really depends on your disc and supported hashes).
 * Region sorted per core, usually just set it to Auto.
 * Acoustic Disc Mirror: pop a spare disc in and the drive spins and seeks along with CHD games you play off the SD card, for the sound of a real console. ([Video](https://youtu.be/H7zMJVK5tPI))
+* On-the-fly translation. Press a button and the screen comes back translated, drawn into the game's own text boxes, on any core. Works over HDMI, and on CRTs over RGB. Setup is in [translate/README.md](translate/README.md).
 
 ## Two versions, pick one
 

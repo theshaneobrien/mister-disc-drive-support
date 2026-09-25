@@ -6,6 +6,52 @@
 > nothing appeared on screen. This is not a bug in our code. It is the
 > gateware's output mux, and it is not fixable in the direction we were
 > pushing.
+>
+> **Update 2026-09-25: resolved on hardware - see section 0. Section 4's
+> recommendation is superseded; the analysis in sections 1-3 held.**
+
+## 0. Outcome (hardware-tested 2026-09-25)
+
+Tested on an OSSC fed analog RGB over SCART (Ultimate MiSTer VGA-to-SCART),
+SNES core, the reporter's exact configuration (`vga_scaler=0`,
+`direct_video=0`, `vga_mode=rgb`, `composite_sync=1`,
+`forced_scandoubler=0`). The OSSC sits on the same pins a CRT does and reports
+the input mode, which made it a better instrument than a tube.
+
+**What held:** section 1, exactly. `vga_scaler=0` plus image mode shows no
+overlay. The raw-path OSD - `osd_msg` and `MODE=text` - does reach analog RGB,
+the first time either was seen on a 15 kHz signal.
+
+**What changed:** Option A works for 15 kHz RGB, given the right mode.
+`vga_scaler=1` with `video_mode=320,15,30,35,240,4,4,14,6293` read on the OSSC
+as `RGBS 262p 15.73kHz 60.05Hz` - genuine 240p - carrying the colour overlay.
+The width has to be 320: `ascal` assumes square output pixels, and 640x240 on
+a 4:3 tube is 2:1, so a 640-wide mode draws a 4:3 picture only 320 pixels
+wide. `vscale_mode=1` (lines 1:1) and scoping the block to a core section
+(`[SNES]`) both worked.
+
+**A Main bug, found and fixed (`9a8c513`).** With `vsync_adjust=1` the top of
+the overlay went black about a frame after it appeared. Enabling the
+framebuffer changes the FB parameters; `get_video_info` counts that as a video
+change; `video_mode_adjust` answers with a full mode re-set - of an identical
+mode, since `vtime` never moved - whose `video_fb_config` and Linux fb module
+reconfig blanked the top. The perf log showed `fb: config after mode set`
+24 ms after `overlay_show`, and `vsync_adjust=0` made it vanish. An overlay
+toggle that leaves the core's `vtime`/width/height alone is no longer a video
+change. The same re-set would have mis-fitted `vscale_mode` 4/5 (it reads
+`fb_width/height` as the core size while `fb_en`), and it can hit HDMI users
+with `vsync_adjust=1` too.
+
+**Revised recommendation:** document Option A for RGB CRT users
+(translate/README.md, "On a CRT"), with `MODE=text` as the keep-your-native-
+picture alternative and the only route for S-Video/composite. Option B stays
+rejected. Option D (detect + automatic text fallback) is still worth doing,
+but it is no longer the only answer for RGB.
+
+**Still unverified:** a real 15 kHz tube (the reporter's Trinitron is the
+test; the test rig's own SCART TV sits in composite mode for want of a pin-16
+voltage); `MODE=text` on real S-Video/composite; a 50 Hz 288-line variant for
+PAL games.
 
 ## 1. The mechanism
 
